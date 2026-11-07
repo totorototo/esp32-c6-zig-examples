@@ -1,0 +1,9 @@
+[wokwi]
+version = 1
+firmware = "zig-out/firmware/weblight.elf"
+elf = "zig-out/firmware/weblight.elf"
+
+# Open http://localhost:8080/ on the Mac while the simulation runs.
+[[net.forward]]
+from = "localhost:8080"
+to = "target:80"
