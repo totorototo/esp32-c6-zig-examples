@@ -1,0 +1,15 @@
+.{
+    .name = .oled,
+    .fingerprint = 0x519930ae992a2ee2,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        // Your local MicroZig checkout, on the esp32-c6 branch.
+        .microzig = .{ .path = "../../../microzig" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
