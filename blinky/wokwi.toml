@@ -1,0 +1,10 @@
+[wokwi]
+version = 1
+# Smoke test: logs on UART0 (GPIO16 -> serial monitor). Copied from
+# microzig/examples/espressif/esp/zig-out/firmware/esp32_c6_c6_smoke_test.elf
+firmware = "zig-out/firmware/c6_smoke_test.elf"
+elf = "zig-out/firmware/c6_smoke_test.elf"
+
+# Blinky demo (logs over USB-Serial-JTAG, not shown on the UART monitor):
+# firmware = "zig-out/firmware/blinky.elf"
+# elf = "zig-out/firmware/blinky.elf"
