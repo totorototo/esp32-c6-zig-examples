@@ -1,0 +1,17 @@
+.{
+    .name = .hue,
+    .fingerprint = 0xd6155beefd26584c,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        // Your local MicroZig checkout, on the esp32-c6 branch.
+        .microzig = .{ .path = "../../../microzig" },
+        .lwip = .{ .path = "../../../microzig/modules/lwip" },
+        .foundation_libc = .{ .path = "../../../microzig/modules/foundation-libc" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

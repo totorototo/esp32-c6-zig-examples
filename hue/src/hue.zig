@@ -1,0 +1,173 @@
+//! Minimal Philips Hue bridge client: local API v1 over plain HTTP (port 80).
+const std = @import("std");
+const net = @import("net.zig");
+const lwip = net.lwip;
+
+const log = std.log.scoped(.hue);
+
+pub const Bridge = struct {
+    addr: lwip.c.ip_addr_t,
+    host: []const u8,
+
+    pub fn init(ip: []const u8) !Bridge {
+        return .{ .addr = try parse_ipv4(ip), .host = ip };
+    }
+};
+
+pub const Config = struct {
+    name: []const u8,
+    apiversion: []const u8,
+    bridgeid: []const u8,
+};
+
+pub const LightState = struct {
+    on: bool,
+    reachable: bool = true,
+};
+
+pub const Light = struct {
+    name: []const u8,
+    state: LightState,
+};
+
+/// One entry of the array the bridge returns for writes and for errors.
+const Result = struct {
+    success: ?std.json.Value = null,
+    @"error": ?struct { type: u32, description: []const u8 } = null,
+};
+
+pub const Error = error{ BridgeError, HttpStatus, BadResponse };
+
+/// Response bodies land here. `/lights` with many lights runs to tens of KiB.
+var response_buf: [48 * 1024]u8 = undefined;
+
+pub fn get_config(arena: std.mem.Allocator, bridge: Bridge) !Config {
+    const body = try request(bridge, "GET", "/api/config", "");
+    return parse(Config, arena, body);
+}
+
+/// Pairing: succeeds only within 30 s of pressing the bridge's link button.
+/// Returns null while the button has not been pressed.
+pub fn create_user(arena: std.mem.Allocator, bridge: Bridge, devicetype: []const u8) !?[]const u8 {
+    var req: [64]u8 = undefined;
+    const body = try request(bridge, "POST", "/api", try std.fmt.bufPrint(&req, "{{\"devicetype\":\"{s}\"}}", .{devicetype}));
+    const results = try parse([]Result, arena, body);
+    if (results.len == 0) return error.BadResponse;
+    if (results[0].@"error") |e| {
+        if (e.type == 101) return null; // link button not pressed
+        log.err("pairing failed: {s} (type {})", .{ e.description, e.type });
+        return error.BridgeError;
+    }
+    const success = results[0].success orelse return error.BadResponse;
+    const user = success.object.get("username") orelse return error.BadResponse;
+    if (user != .string) return error.BadResponse;
+    return user.string;
+}
+
+pub fn get_lights(arena: std.mem.Allocator, bridge: Bridge, user: []const u8) !std.json.ArrayHashMap(Light) {
+    var path: [96]u8 = undefined;
+    const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/lights", .{user}), "");
+    try check_error(arena, body);
+    return parse(std.json.ArrayHashMap(Light), arena, body);
+}
+
+pub fn get_light(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id: []const u8) !Light {
+    var path: [112]u8 = undefined;
+    const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}", .{ user, id }), "");
+    try check_error(arena, body);
+    return parse(Light, arena, body);
+}
+
+pub fn set_on(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id: []const u8, on: bool) !void {
+    var path: [128]u8 = undefined;
+    const body = try request(
+        bridge,
+        "PUT",
+        try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}/state", .{ user, id }),
+        if (on) "{\"on\":true}" else "{\"on\":false}",
+    );
+    try check_error(arena, body);
+}
+
+/// Reads go back as an object, but failures (e.g. an unknown username) come back as an
+/// array of `{"error": ...}`, still with HTTP 200.
+fn check_error(arena: std.mem.Allocator, body: []const u8) !void {
+    const trimmed = std.mem.trimStart(u8, body, " \r\n\t");
+    if (trimmed.len == 0 or trimmed[0] != '[') return;
+    const results = try parse([]Result, arena, trimmed);
+    for (results) |r| if (r.@"error") |e| {
+        log.err("bridge error: {s} (type {})", .{ e.description, e.type });
+        return error.BridgeError;
+    };
+}
+
+fn parse(comptime T: type, arena: std.mem.Allocator, body: []const u8) !T {
+    return std.json.parseFromSliceLeaky(T, arena, body, .{ .ignore_unknown_fields = true }) catch |err| {
+        log.err("unexpected JSON ({t}): {s}", .{ err, body[0..@min(body.len, 160)] });
+        return error.BadResponse;
+    };
+}
+
+/// One HTTP exchange; returns the response body (valid until the next request).
+/// HTTP/1.0 so the bridge can't answer with chunked encoding: it closes the connection
+/// after the body, which is how we find the end.
+fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u8) ![]const u8 {
+    const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
+        return error.OutOfMemory;
+    defer _ = lwip.c.netconn_delete(conn);
+    conn[0].recv_timeout = 5000;
+
+    try lwip.c_err(lwip.c.netconn_connect(conn, &bridge.addr, 80));
+    defer _ = lwip.c.netconn_close(conn);
+
+    var head: [256]u8 = undefined;
+    const req = try std.fmt.bufPrint(&head, "{s} {s} HTTP/1.0\r\nHost: {s}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", .{ method, path, bridge.host, body.len });
+    try write_all(conn, req);
+    if (body.len > 0) try write_all(conn, body);
+
+    var len: usize = 0;
+    while (true) {
+        var nb: ?*lwip.c.netbuf = null;
+        lwip.c_err(lwip.c.netconn_recv(conn, &nb)) catch |err| switch (err) {
+            error.ConnectionClosed => break,
+            else => return err,
+        };
+        defer lwip.c.netbuf_delete(nb);
+        while (true) {
+            var ptr: ?*anyopaque = null;
+            var n: u16 = 0;
+            try lwip.c_err(lwip.c.netbuf_data(nb, &ptr, &n));
+            const chunk = @as([*]const u8, @ptrCast(ptr))[0..n];
+            if (len + chunk.len > response_buf.len) return error.ResponseTooLarge;
+            @memcpy(response_buf[len..][0..chunk.len], chunk);
+            len += chunk.len;
+            if (lwip.c.netbuf_next(nb) < 0) break;
+        }
+    }
+
+    const resp = response_buf[0..len];
+    const head_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return error.BadResponse;
+    // "HTTP/1.x 200 ..."
+    if (resp.len < 12 or !std.mem.eql(u8, resp[9..12], "200")) {
+        log.err("HTTP status: {s}", .{resp[0 .. std.mem.indexOf(u8, resp, "\r\n") orelse 0]});
+        return error.HttpStatus;
+    }
+    return resp[head_end + 4 ..];
+}
+
+fn write_all(conn: *lwip.c.netconn, bytes: []const u8) !void {
+    try lwip.c_err(lwip.c.netconn_write_partly(conn, bytes.ptr, bytes.len, lwip.c.NETCONN_COPY, null));
+}
+
+fn parse_ipv4(s: []const u8) !lwip.c.ip_addr_t {
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, s, '.');
+    for (&octets) |*o| o.* = try std.fmt.parseInt(u8, it.next() orelse return error.BadAddress, 10);
+    if (it.next() != null) return error.BadAddress;
+
+    var addr = std.mem.zeroes(lwip.c.ip_addr_t);
+    addr.type = lwip.c.IPADDR_TYPE_V4;
+    // lwIP stores IPv4 addresses in network byte order.
+    addr.u_addr.ip4.addr = std.mem.readInt(u32, &octets, .little);
+    return addr;
+}
