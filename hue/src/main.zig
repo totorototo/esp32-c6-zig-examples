@@ -3,14 +3,19 @@
 //!   1. Fetches `/api/config` and logs the bridge name (no pairing needed).
 //!   2. Without `-Dhue_user`: pairing mode. Press the bridge's link button; the board logs
 //!      the username to rebuild with.
-//!   3. With `-Dhue_user`: lists the lights. With `-Dhue_light` too, the BOOT button (GPIO9)
-//!      toggles that light, and the on-board LED mirrors its state.
+//!   3. With `-Dhue_user`: lists the lights.
+//!   4. With `-Dhue_light` too, controls that light:
+//!      - BOOT button (GPIO9): short press toggles, long press steps the brightness.
+//!      - Web remote on port 80: on/off, brightness, colour.
+//!      - The on-board LED mirrors the light's colour; state is refreshed every 5 s.
 //! Logs go to UART0 (115200 baud).
 const std = @import("std");
 const microzig = @import("microzig");
 const config = @import("config");
 const net = @import("net.zig");
 const hue = @import("hue.zig");
+const web = @import("web.zig");
+const lwip = net.lwip;
 
 const hal = microzig.hal;
 const gpio = hal.gpio;
@@ -100,7 +105,7 @@ pub fn main() !void {
 
     try list_lights(bridge);
     if (config.hue_light.len == 0) {
-        std.log.info("rebuild with -Dhue_light=<id> to toggle one of these with the BOOT button", .{});
+        std.log.info("rebuild with -Dhue_light=<id> to control one of these", .{});
         show(.{ .r = 0, .g = 8, .b = 0 });
         return;
     }
@@ -137,60 +142,210 @@ fn list_lights(bridge: hue.Bridge) !void {
     }
 }
 
+// ---- control: button + web remote + periodic refresh, in one loop ----
+
+const long_press_ms = 600;
+const http_port = 80;
+const brightness_steps = [_]u8{ 64, 127, 191, 254 };
+
+/// Last known state of the controlled light.
+var light: hue.LightState = .{ .on = false };
+var light_name_buf: [64]u8 = undefined;
+var light_name: []const u8 = "";
+
 fn control(bridge: hue.Bridge) !void {
-    const initial = try fetch(bridge);
-    var on = initial.on;
-    std.log.info("light {s} is {s}", .{ config.hue_light, if (on) "on" else "off" });
-    var was_pressed = false;
-    var handled = false; // this press already toggled; wait for release
-    var since_refresh: u32 = 0;
-    std.log.info("press BOOT to toggle light {s}", .{config.hue_light});
+    try refresh(bridge);
+    std.log.info("light {s} `{s}`: {s}, bri {?}, {s}", .{
+        config.hue_light, light_name,                                          if (light.on) "on" else "off",
+        light.bri,        if (light.hue != null) "colour" else "white only",
+    });
 
-    while (true) : (rtos.sleep(.from_ms(poll_ms))) {
-        // Debounce: a press counts once, when the pin reads low on two polls in a row.
-        const pressed = button.read() == 0;
-        defer was_pressed = pressed;
-        if (!pressed) handled = false;
+    const server = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
+        return error.OutOfMemory;
+    try lwip.c_err(lwip.c.netconn_bind(server, null, http_port));
+    try lwip.c_err(lwip.c.netconn_listen(server));
+    // With LWIP_SO_RCVTIMEO, accept gives up after this long: it doubles as the loop tick,
+    // so the button, the web server and the refresh share one task and need no locking.
+    server[0].recv_timeout = poll_ms;
+    std.log.info("BOOT: short press toggles, long press steps brightness. Web remote: http://{f}:{}/", .{ net.ip(), http_port });
 
-        if (pressed and was_pressed and !handled) {
-            handled = true;
-            var arena: std.heap.ArenaAllocator = .init(heap.allocator());
-            defer arena.deinit();
-            if (hue.set_on(arena.allocator(), bridge, config.hue_user, config.hue_light, !on)) {
-                on = !on;
-                std.log.info("light {s} -> {s}", .{ config.hue_light, if (on) "on" else "off" });
-                show_state(on);
-            } else |err| std.log.err("toggle failed: {t}", .{err});
-            since_refresh = 0;
-            continue;
+    var raw_prev = false;
+    var pressed = false; // debounced
+    var press_start: u64 = 0;
+    var next_step: u64 = 0; // long press: time of the next brightness step
+    var stepped = false; // this press changed brightness, so its release doesn't toggle
+    var last_refresh = now_ms();
+
+    while (true) {
+        var client: ?*lwip.c.netconn = null;
+        if (lwip.c_err(lwip.c.netconn_accept(server, &client))) {
+            serve(bridge, client.?) catch |err| std.log.warn("request failed: {t}", .{err});
+            _ = lwip.c.netconn_close(client);
+            _ = lwip.c.netconn_delete(client);
+        } else |err| switch (err) {
+            error.Timeout => {},
+            else => {
+                std.log.err("accept failed: {t}", .{err});
+                rtos.sleep(.from_ms(poll_ms));
+            },
+        }
+
+        // Debounce: the state changes only when two consecutive samples agree.
+        const raw = button.read() == 0;
+        defer raw_prev = raw;
+        const t = now_ms();
+        if (raw == raw_prev and raw != pressed) {
+            pressed = raw;
+            if (pressed) {
+                press_start = t;
+                next_step = t + long_press_ms;
+                stepped = false;
+            } else if (!stepped) {
+                apply(bridge, .{ .on = !light.on });
+            }
+        }
+        if (pressed and t >= next_step and light.bri != null) {
+            next_step = t + long_press_ms;
+            stepped = true;
+            apply(bridge, .{ .on = true, .bri = next_brightness(if (light.on) light.bri.? else 0) });
         }
 
         // Pick up changes made from the Hue app or a wall switch.
-        since_refresh += poll_ms;
-        if (since_refresh < refresh_ms) continue;
-        since_refresh = 0;
-        const state = fetch(bridge) catch |err| {
-            std.log.warn("refresh failed: {t}", .{err});
-            continue;
-        };
-        if (state.on != on) {
-            on = state.on;
-            std.log.info("light {s} is now {s} (changed elsewhere)", .{ config.hue_light, if (on) "on" else "off" });
+        if (!pressed and t - last_refresh >= refresh_ms) {
+            last_refresh = t;
+            const before = light;
+            refresh(bridge) catch |err| std.log.warn("refresh failed: {t}", .{err});
+            if (before.on != light.on or !std.meta.eql(before.bri, light.bri))
+                std.log.info("light changed elsewhere: {s}, bri {?}", .{ if (light.on) "on" else "off", light.bri });
         }
     }
 }
 
-fn fetch(bridge: hue.Bridge) !hue.LightState {
-    var arena: std.heap.ArenaAllocator = .init(heap.allocator());
-    defer arena.deinit();
-    const light = try hue.get_light(arena.allocator(), bridge, config.hue_user, config.hue_light);
-    std.log.debug("light {s} `{s}`: {s}", .{ config.hue_light, light.name, if (light.state.on) "on" else "off" });
-    show_state(light.state.on);
-    return light.state;
+fn next_brightness(current: u8) u8 {
+    for (brightness_steps) |b| if (b > @as(u16, current) + 8) return b;
+    return brightness_steps[0];
 }
 
-fn show_state(on: bool) void {
-    show(if (on) .{ .r = 24, .g = 12, .b = 2 } else .{ .r = 0, .g = 0, .b = 0 });
+fn apply(bridge: hue.Bridge, change: hue.Change) void {
+    var arena: std.heap.ArenaAllocator = .init(heap.allocator());
+    defer arena.deinit();
+    hue.set_state(arena.allocator(), bridge, config.hue_user, config.hue_light, change) catch |err| {
+        std.log.err("set state failed: {t}", .{err});
+        return;
+    };
+    if (change.on) |v| light.on = v;
+    if (change.bri) |v| light.bri = v;
+    if (change.hue) |v| light.hue = v;
+    if (change.sat) |v| light.sat = v;
+    std.log.info("light {s} -> {s}, bri {?}, hue {?}, sat {?}", .{ config.hue_light, if (light.on) "on" else "off", light.bri, light.hue, light.sat });
+    mirror();
+}
+
+fn refresh(bridge: hue.Bridge) !void {
+    var arena: std.heap.ArenaAllocator = .init(heap.allocator());
+    defer arena.deinit();
+    const l = try hue.get_light(arena.allocator(), bridge, config.hue_user, config.hue_light);
+    light = l.state;
+    const n = @min(l.name.len, light_name_buf.len);
+    @memcpy(light_name_buf[0..n], l.name[0..n]);
+    light_name = std.mem.trimEnd(u8, light_name_buf[0..n], " ");
+    mirror();
+}
+
+// ---- web remote ----
+
+const page = @embedFile("page.html");
+
+fn serve(bridge: hue.Bridge, conn: *lwip.c.netconn) !void {
+    conn.recv_timeout = 3000;
+    var buf: [1024]u8 = undefined;
+    const req = web.read_request(conn, &buf) catch |err| switch (err) {
+        error.BadRequest => return web.respond(conn, "400 Bad Request", "text/plain", "bad request\n"),
+        else => return err,
+    };
+    std.log.info("{s} {s}{s}{s}", .{ req.method, req.path, if (req.query.len > 0) "?" else "", req.query });
+
+    if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
+    if (req.is("GET", "/state")) return respond_state(conn);
+    if (req.is("POST", "/set")) {
+        const change = parse_change(req.query) catch
+            return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
+        apply(bridge, change);
+        return respond_state(conn);
+    }
+    return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
+}
+
+fn parse_change(query: []const u8) !hue.Change {
+    var change: hue.Change = .{};
+    var it = web.params(query);
+    while (it.next()) |kv| {
+        const key, const value = web.split_param(kv) orelse return error.BadParameter;
+        if (std.mem.eql(u8, key, "on")) {
+            change.on = (try std.fmt.parseInt(u1, value, 10)) == 1;
+        } else if (std.mem.eql(u8, key, "bri")) {
+            change.bri = try std.fmt.parseInt(u8, value, 10);
+        } else if (std.mem.eql(u8, key, "hue")) {
+            change.hue = try std.fmt.parseInt(u16, value, 10);
+        } else if (std.mem.eql(u8, key, "sat")) {
+            change.sat = try std.fmt.parseInt(u8, value, 10);
+        } else return error.BadParameter;
+    }
+    return change;
+}
+
+fn respond_state(conn: *lwip.c.netconn) !void {
+    var body: [256]u8 = undefined;
+    const json = try std.fmt.bufPrint(&body, "{f}", .{std.json.fmt(.{
+        .name = light_name,
+        .on = light.on,
+        .reachable = light.reachable,
+        .bri = light.bri,
+        .hue = light.hue,
+        .sat = light.sat,
+    }, .{})});
+    return web.respond(conn, "200 OK", "application/json", json);
+}
+
+// ---- on-board LED: mirrors the light ----
+
+/// Shows the light's colour, dimmed: a WS2812 at full power is blinding.
+fn mirror() void {
+    if (!light.on) return show(.{ .r = 0, .g = 0, .b = 0 });
+    const v: u32 = @max(@as(u32, light.bri orelse 254) * 40 / 254, 2);
+    if (light.hue == null or light.sat == null) return show(scale(.{ .r = 255, .g = 160, .b = 60 }, v));
+    return show(scale(hsv_to_rgb(light.hue.?, light.sat.?), v));
+}
+
+fn scale(c: Color, v: u32) Color {
+    return .{
+        .r = @intCast(@as(u32, c.r) * v / 255),
+        .g = @intCast(@as(u32, c.g) * v / 255),
+        .b = @intCast(@as(u32, c.b) * v / 255),
+    };
+}
+
+/// Hue 0..65535, saturation 0..254, full value.
+fn hsv_to_rgb(h: u16, sat: u8) Color {
+    const s: u32 = @as(u32, @min(sat, 254)) * 255 / 254;
+    const h6: u32 = @as(u32, h) * 6; // 0 .. 6*65535
+    const sector = h6 >> 16; // 0..5
+    const f: u32 = (h6 & 0xffff) >> 8; // 0..255 within the sector
+    const p: u8 = @intCast(255 - s);
+    const q: u8 = @intCast(255 - s * f / 255);
+    const t: u8 = @intCast(255 - s * (255 - f) / 255);
+    return switch (sector) {
+        0 => .{ .r = 255, .g = t, .b = p },
+        1 => .{ .r = q, .g = 255, .b = p },
+        2 => .{ .r = p, .g = 255, .b = t },
+        3 => .{ .r = p, .g = q, .b = 255 },
+        4 => .{ .r = t, .g = p, .b = 255 },
+        else => .{ .r = 255, .g = p, .b = q },
+    };
+}
+
+fn now_ms() u64 {
+    return hal.time.get_time_since_boot().to_us() / 1000;
 }
 
 fn init_led() void {

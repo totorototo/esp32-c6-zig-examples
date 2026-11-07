@@ -23,11 +23,25 @@ pub const Config = struct {
 pub const LightState = struct {
     on: bool,
     reachable: bool = true,
+    /// Brightness 1..254. Absent on on/off-only plugs.
+    bri: ?u8 = null,
+    /// Hue 0..65535 and saturation 0..254. Absent on white-only lights.
+    hue: ?u16 = null,
+    sat: ?u8 = null,
 };
 
 pub const Light = struct {
     name: []const u8,
+    type: []const u8 = "",
     state: LightState,
+};
+
+/// A state change; null fields are left alone.
+pub const Change = struct {
+    on: ?bool = null,
+    bri: ?u8 = null,
+    hue: ?u16 = null,
+    sat: ?u8 = null,
 };
 
 /// One entry of the array the bridge returns for writes and for errors.
@@ -78,14 +92,21 @@ pub fn get_light(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id:
     return parse(Light, arena, body);
 }
 
-pub fn set_on(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id: []const u8, on: bool) !void {
+/// Applies `change`. The bridge rejects bri/hue/sat while a light is off (error 201), so
+/// callers changing those should also pass `.on = true`.
+pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id: []const u8, change: Change) !void {
+    if (std.meta.eql(change, Change{})) return; // nothing to change
+
+    // The bridge rejects bri 0 and bri/sat 255.
+    var c = change;
+    if (c.bri) |v| c.bri = std.math.clamp(v, 1, 254);
+    if (c.sat) |v| c.sat = @min(v, 254);
+
+    var json_buf: [80]u8 = undefined;
+    const json = try std.fmt.bufPrint(&json_buf, "{f}", .{std.json.fmt(c, .{ .emit_null_optional_fields = false })});
+
     var path: [128]u8 = undefined;
-    const body = try request(
-        bridge,
-        "PUT",
-        try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}/state", .{ user, id }),
-        if (on) "{\"on\":true}" else "{\"on\":false}",
-    );
+    const body = try request(bridge, "PUT", try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}/state", .{ user, id }), json);
     try check_error(arena, body);
 }
 

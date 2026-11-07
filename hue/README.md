@@ -7,11 +7,20 @@ HTTPS-only, and there is no TLS stack in the firmware.
 2. **Pairing mode** (no `-Dhue_user`): press the round link button on the bridge. For 60 s the
    board retries `POST /api`, then logs the username to rebuild with.
 3. **Lights** (`-Dhue_user`): logs every light's id, name and state.
-4. **Control** (`-Dhue_light` too): the BOOT button (GPIO9) toggles that light. The on-board
-   LED mirrors its state, which is refreshed every 5 s to pick up changes made elsewhere.
+4. **Control** (`-Dhue_light` too):
+   - BOOT button (GPIO9): a short press toggles the light, a long press steps the brightness
+     (25 → 50 → 75 → 100 %, repeating every 0.6 s while held).
+   - Web remote on port 80: on/off, a brightness slider, and a colour picker (hidden for
+     white-only lights). `GET /state` returns JSON; `POST /set?on=1&bri=200&hue=8000&sat=254`
+     applies any subset of the parameters.
+   - The on-board LED mirrors the light's colour and brightness (dimmed). State is refreshed
+     every 5 s, so changes made from the Hue app show up.
 
-On-board LED: blue = starting, orange = pairing, green = done or idle, warm white = light on,
-red = error.
+   Everything runs in one loop: `netconn_accept` with a 20 ms timeout doubles as the
+   button-polling tick, so there is no second task and no locking.
+
+On-board LED: blue = starting, orange = pairing, green = done or idle, red = error; in
+control mode, it shows the light's colour.
 
 ## Build
 
@@ -25,7 +34,8 @@ in the source.
 
 ## Run
 
-Wokwi: open `diagram.json`. The green pushbutton is wired to GPIO9. The simulated board reaches
+Wokwi: open `diagram.json`. The green pushbutton is wired to GPIO9, and the web remote is
+forwarded to http://localhost:8080/. The simulated board reaches
 the bridge only if Wokwi routes its traffic through your Mac's network; step 1 shows whether it does.
 
 Hardware: `espflash flash --monitor zig-out/firmware/hue.elf` (logs on UART0, 115200 baud),
