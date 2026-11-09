@@ -4,10 +4,10 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
-        // Your local MicroZig checkout, on the esp32-c6 branch.
-        .microzig = .{ .path = "../../../microzig" },
-        .lwip = .{ .path = "../../../microzig/modules/lwip" },
-        .foundation_libc = .{ .path = "../../../microzig/modules/foundation-libc" },
+        .microzig = .{
+            .url = "git+https://github.com/totorototo/microzig#beeb5cc57deae4625ee453bffc603af878fb9642",
+            .hash = "microzig-0.17.33-D20YSaEqkwHYeEOeTNOuujodb7_zUIxteRKv9gBnZF5l",
+        },
     },
     .paths = .{
         "build.zig",

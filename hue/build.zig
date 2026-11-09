@@ -31,18 +31,20 @@ pub fn build(b: *std.Build) void {
     });
     fw.exe.root_module.addOptions("config", options);
 
-    // lwIP, built against our lwipopts.h, plus the small libc it needs.
+    // lwIP, built against our lwipopts.h, plus the small libc it needs. Both come from
+    // MicroZig's tree as lazy dependencies: null on the first pass, while Zig fetches
+    // lwIP's sources, then the build runs again.
     const target = b.resolveTargetQuery(fw.target.zig_target);
-    const foundation_dep = b.dependency("foundation_libc", .{
+    const foundation_dep = mz_dep.builder.lazyDependency("modules/foundation-libc", .{
         .target = target,
         .optimize = optimize,
         .single_threaded = true,
-    });
-    const lwip_dep = b.dependency("lwip", .{
+    }) orelse return;
+    const lwip_dep = mz_dep.builder.lazyDependency("modules/lwip", .{
         .target = target,
         .optimize = optimize,
         .include_dir = b.path("src/lwip/include"),
-    });
+    }) orelse return;
     const lwip = lwip_dep.module("lwip");
     lwip.linkLibrary(foundation_dep.artifact("foundation"));
     fw.exe.root_module.addImport("lwip", lwip);

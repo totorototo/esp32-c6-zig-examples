@@ -4,7 +4,9 @@ Drives a 128x64 SSD1306 OLED over I2C: a title, the bus settings, a large frame 
 and a square bouncing along the bottom. Each frame pushes the full 1 KiB framebuffer, so it
 exercises the C6 I2C HAL including multi-chunk writes. Logs go to UART0 (115200 baud).
 
-Uses the local MicroZig checkout at `../../../microzig`, which must be on the `esp32-c6` branch.
+Fetches MicroZig from the `esp32-c6` branch of
+[totorototo/microzig](https://github.com/totorototo/microzig), pinned in `build.zig.zon` (see the
+top-level README).
 
 ## Wiring
 

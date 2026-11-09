@@ -3,7 +3,9 @@
 Blinks the on-board RGB LED of an ESP32-C6-DevKitC-1 (WS2812 on GPIO8, driven through SPI2)
 and logs over the USB-Serial-JTAG port.
 
-Uses the local MicroZig checkout at `../../../microzig`, which must be on the `esp32-c6` branch.
+Fetches MicroZig from the `esp32-c6` branch of
+[totorototo/microzig](https://github.com/totorototo/microzig), pinned in `build.zig.zon` (see the
+top-level README).
 
 ## Build
 
