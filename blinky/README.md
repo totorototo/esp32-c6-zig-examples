@@ -32,7 +32,6 @@ Expected log:
 
 ## Simulate
 
-    wokwi-cli --timeout 5000 .
-
-(or the Wokwi VS Code extension). The log goes to USB-Serial-JTAG, which Wokwi may not show;
-the LED on the board is the thing to watch.
+Build, then open `diagram.json` with the Wokwi VS Code extension (setup in the top-level
+README), or run `wokwi-cli --timeout 5000 .`. The log goes to USB-Serial-JTAG, which Wokwi may
+not show; the LED on the board is the thing to watch.

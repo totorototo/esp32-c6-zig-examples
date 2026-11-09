@@ -29,8 +29,9 @@ The server handles one connection at a time and closes it after each response.
 
 ## Run
 
-Wokwi: open `diagram.json`, wait for `open http://...` in the serial monitor, then browse to
-http://localhost:8080/ (forwarded by `wokwi.toml`).
+Wokwi (setup in the top-level README): build with the defaults, open `diagram.json`, wait for
+`open http://...` in the serial monitor, then browse to http://localhost:8080/ (forwarded by
+`wokwi.toml`).
 
 Hardware: `espflash flash --monitor zig-out/firmware/weblight.elf`, then open the logged
 address from a device on the same network. Logs go to UART0 (115200 baud).

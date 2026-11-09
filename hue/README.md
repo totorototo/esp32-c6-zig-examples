@@ -57,14 +57,20 @@ real panel, flip the axes in `src/ft6206.zig` `read`.
     zig build -Doptimize=ReleaseSmall -Dhue_user=<username>               # screen: list page
     zig build -Doptimize=ReleaseSmall -Dhue_user=<username> -Dhue_light=3 # open on light 3
 
-Other options: `-Dscreen=false` (no touch screen; the LED mirrors the light instead), `-Dhue_ip=` (default `192.168.1.125`), `-Dssid=`, `-Dpassword=` (default
-`Wokwi-GUEST`, open). The username is a bridge credential: keep it on the command line, never
+Other options: `-Dscreen=false` (no touch screen; the LED mirrors the light instead),
+`-Dhue_ip=` (default `192.168.1.125`), `-Dssid=`, `-Dpassword=` (default `Wokwi-GUEST`, open). The username is a bridge credential: keep it on the command line, never
 in the source.
 
 ## Run
 
-Wokwi: open `diagram.json`. The touch screen is wired as above (click it to touch), and the web remote is forwarded to http://localhost:8080/. The simulated board reaches
-the bridge only if Wokwi routes its traffic through your Mac's network; step 1 shows whether it does.
+Wokwi (setup in the top-level README): open `diagram.json`. The touch screen is wired as
+above (click it to touch), and the web remote is forwarded to http://localhost:8080/.
+
+The simulated board needs to reach your real bridge, so run it from the VS Code extension
+(its gateway routes the board's traffic through your computer) with `-Dhue_ip=` set to the
+bridge's address. On macOS 15+, allow VS Code under System Settings → Privacy & Security →
+Local Network, or the connection is refused. Step 1 (the bridge name in the log) shows
+whether it works. `wokwi-cli` runs in Wokwi's cloud and can't reach your LAN.
 
 Hardware: `espflash flash --monitor zig-out/firmware/hue.elf` (logs on UART0, 115200 baud),
 with `-Dssid`/`-Dpassword` set to your Wi-Fi.

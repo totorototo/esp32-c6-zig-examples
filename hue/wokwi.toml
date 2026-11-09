@@ -3,7 +3,7 @@ version = 1
 firmware = "zig-out/firmware/hue.elf"
 elf = "zig-out/firmware/hue.elf"
 
-# Web remote: open http://localhost:8080/ on the Mac while the simulation runs.
+# Web remote: open http://localhost:8080/ on your computer while the simulation runs.
 [[net.forward]]
 from = "localhost:8080"
 to = "target:80"
