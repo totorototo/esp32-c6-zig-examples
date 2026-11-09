@@ -16,6 +16,8 @@ pub fn build(b: *std.Build) void {
     // Hue bridge settings. The username is a bridge credential: pass it on the command line only.
     options.addOption([]const u8, "hue_ip", b.option([]const u8, "hue_ip", "Hue bridge IPv4 address") orelse "192.168.1.125");
     options.addOption([]const u8, "hue_user", b.option([]const u8, "hue_user", "Hue API username (empty: pairing mode)") orelse "");
+    // Touch screen (ILI9341 + FT6206). It takes SPI2 from the on-board LED.
+    options.addOption(bool, "screen", b.option(bool, "screen", "ILI9341 + FT6206 touch screen (default: true)") orelse true);
     options.addOption([]const u8, "hue_light", b.option([]const u8, "hue_light", "Light id to toggle (empty: just list lights)") orelse "");
 
     const mz_dep = b.dependency("microzig", .{});

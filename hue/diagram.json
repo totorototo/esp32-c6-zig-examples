@@ -4,13 +4,21 @@
   "editor": "wokwi",
   "parts": [
     { "type": "board-esp32-c6-devkitc-1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
-    { "type": "wokwi-pushbutton", "id": "btn", "top": 40, "left": 180, "attrs": { "color": "green", "label": "toggle (GPIO9)" } }
+    { "type": "board-ili9341-cap-touch", "id": "lcd1", "top": -60, "left": 300, "attrs": {} }
   ],
   "connections": [
     [ "esp:TX", "$serialMonitor:RX", "", [] ],
     [ "esp:RX", "$serialMonitor:TX", "", [] ],
-    [ "btn:1.l", "esp:9", "green", [] ],
-    [ "btn:2.l", "esp:GND.1", "black", [] ]
+    [ "lcd1:VCC", "esp:3V3", "red", [] ],
+    [ "lcd1:GND", "esp:GND.1", "black", [] ],
+    [ "lcd1:LED", "esp:3V3", "red", [] ],
+    [ "lcd1:SCK", "esp:19", "orange", [] ],
+    [ "lcd1:MOSI", "esp:18", "blue", [] ],
+    [ "lcd1:CS", "esp:20", "violet", [] ],
+    [ "lcd1:D/C", "esp:21", "gray", [] ],
+    [ "lcd1:RST", "esp:2", "white", [] ],
+    [ "lcd1:SDA", "esp:22", "green", [] ],
+    [ "lcd1:SCL", "esp:23", "yellow", [] ]
   ],
   "dependencies": {}
 }

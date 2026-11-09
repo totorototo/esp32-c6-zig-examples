@@ -36,6 +36,31 @@ pub const Light = struct {
     state: LightState,
 };
 
+/// A room or zone. `action` holds the last values sent to the whole group, `state` what
+/// its lights actually do.
+pub const Group = struct {
+    name: []const u8,
+    /// "Room", "Zone", "LightGroup", "Entertainment", ...
+    type: []const u8 = "",
+    state: struct { any_on: bool = false, all_on: bool = false } = .{},
+    action: struct { bri: ?u8 = null, hue: ?u16 = null, sat: ?u8 = null } = .{},
+
+    /// The group seen as one light: on when any of its lights is.
+    pub fn as_light(g: Group) Light {
+        return .{ .name = g.name, .type = g.type, .state = .{
+            .on = g.state.any_on,
+            .bri = g.action.bri,
+            .hue = g.action.hue,
+            .sat = g.action.sat,
+        } };
+    }
+};
+
+pub const Kind = enum { light, group };
+
+/// What a read or a change applies to: one light, or a whole room or zone.
+pub const Target = struct { kind: Kind, id: []const u8 };
+
 /// A state change; null fields are left alone.
 pub const Change = struct {
     on: ?bool = null,
@@ -92,9 +117,30 @@ pub fn get_light(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id:
     return parse(Light, arena, body);
 }
 
-/// Applies `change`. The bridge rejects bri/hue/sat while a light is off (error 201), so
-/// callers changing those should also pass `.on = true`.
-pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id: []const u8, change: Change) !void {
+pub fn get_groups(arena: std.mem.Allocator, bridge: Bridge, user: []const u8) !std.json.ArrayHashMap(Group) {
+    var path: [96]u8 = undefined;
+    const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/groups", .{user}), "");
+    try check_error(arena, body);
+    return parse(std.json.ArrayHashMap(Group), arena, body);
+}
+
+/// A light, or a group seen as one light.
+pub fn get(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, target: Target) !Light {
+    return switch (target.kind) {
+        .light => get_light(arena, bridge, user, target.id),
+        .group => {
+            var path: [112]u8 = undefined;
+            const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/groups/{s}", .{ user, target.id }), "");
+            try check_error(arena, body);
+            return (try parse(Group, arena, body)).as_light();
+        },
+    };
+}
+
+/// Applies `change` to a light (`/state`) or to every light of a group (`/action`, same
+/// body). The bridge rejects bri/hue/sat while a light is off (error 201), so callers
+/// changing those should also pass `.on = true`.
+pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, target: Target, change: Change) !void {
     if (std.meta.eql(change, Change{})) return; // nothing to change
 
     // The bridge rejects bri 0 and bri/sat 255.
@@ -106,7 +152,11 @@ pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, id:
     const json = try std.fmt.bufPrint(&json_buf, "{f}", .{std.json.fmt(c, .{ .emit_null_optional_fields = false })});
 
     var path: [128]u8 = undefined;
-    const body = try request(bridge, "PUT", try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}/state", .{ user, id }), json);
+    const url = switch (target.kind) {
+        .light => try std.fmt.bufPrint(&path, "/api/{s}/lights/{s}/state", .{ user, target.id }),
+        .group => try std.fmt.bufPrint(&path, "/api/{s}/groups/{s}/action", .{ user, target.id }),
+    };
+    const body = try request(bridge, "PUT", url, json);
     try check_error(arena, body);
 }
 
