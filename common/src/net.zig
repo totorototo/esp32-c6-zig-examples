@@ -1,5 +1,6 @@
 //! Wi-Fi station + lwIP bring-up, adapted from MicroZig's `tcp_server` example.
-//! `up()` returns once DHCP has assigned an address.
+//! `up()` returns once DHCP has assigned an address. Needs a `config` import with `ssid`
+//! and `password` (see common/build.zig).
 const std = @import("std");
 const microzig = @import("microzig");
 const config = @import("config");
@@ -10,6 +11,7 @@ const radio = hal.radio;
 
 pub const exports = @import("lwip/exports.zig");
 pub const lwip = @import("lwip/include.zig");
+pub const web = @import("web.zig");
 
 const log = std.log.scoped(.net);
 

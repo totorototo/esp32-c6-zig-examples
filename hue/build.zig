@@ -1,5 +1,6 @@
 const std = @import("std");
 const microzig = @import("microzig");
+const common = @import("common");
 
 const MicroBuild = microzig.MicroBuild(.{
     .esp = true,
@@ -18,7 +19,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "hue_user", b.option([]const u8, "hue_user", "Hue API username (empty: pairing mode)") orelse "");
     // Touch screen (ILI9341 + FT6206). It takes SPI2 from the on-board LED.
     options.addOption(bool, "screen", b.option(bool, "screen", "ILI9341 + FT6206 touch screen (default: true)") orelse true);
-    options.addOption([]const u8, "hue_light", b.option([]const u8, "hue_light", "Light id to toggle (empty: just list lights)") orelse "");
+    options.addOption([]const u8, "hue_light", b.option([]const u8, "hue_light", "Light id to open on (required with -Dscreen=false)") orelse "");
 
     const mz_dep = b.dependency("microzig", .{});
     const mb = MicroBuild.init(b, mz_dep) orelse return;
@@ -29,25 +30,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .root_source_file = b.path("src/main.zig"),
     });
-    fw.exe.root_module.addOptions("config", options);
+    const config = options.createModule();
+    fw.exe.root_module.addImport("config", config);
 
-    // lwIP, built against our lwipopts.h, plus the small libc it needs. Both come from
-    // MicroZig's tree as lazy dependencies: null on the first pass, while Zig fetches
-    // lwIP's sources, then the build runs again.
-    const target = b.resolveTargetQuery(fw.target.zig_target);
-    const foundation_dep = mz_dep.builder.lazyDependency("modules/foundation-libc", .{
-        .target = target,
-        .optimize = optimize,
-        .single_threaded = true,
-    }) orelse return;
-    const lwip_dep = mz_dep.builder.lazyDependency("modules/lwip", .{
-        .target = target,
-        .optimize = optimize,
-        .include_dir = b.path("src/lwip/include"),
-    }) orelse return;
-    const lwip = lwip_dep.module("lwip");
-    lwip.linkLibrary(foundation_dep.artifact("foundation"));
-    fw.exe.root_module.addImport("lwip", lwip);
+    // Wi-Fi, lwIP and the HTTP helpers, shared with the other Wi-Fi example (../common).
+    if (!common.add_net(b, mz_dep, fw, .{ .optimize = optimize, .config = config })) return;
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });

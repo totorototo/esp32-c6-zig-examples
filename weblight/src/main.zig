@@ -7,8 +7,9 @@
 //! Logs go to UART0 (115200 baud), so they show up in the Wokwi serial monitor.
 const std = @import("std");
 const microzig = @import("microzig");
-const net = @import("net.zig");
+const net = @import("net");
 const lwip = net.lwip;
+const web = net.web;
 
 const hal = microzig.hal;
 const gpio = hal.gpio;
@@ -119,83 +120,40 @@ fn apply_state() !void {
 
 // ---- HTTP ----
 
-const Request = struct {
-    method: []const u8,
-    path: []const u8,
-    query: []const u8,
-};
-
 fn serve(conn: *lwip.c.netconn) !void {
     // Without this a browser that opens a speculative connection and sends nothing would
     // block the (single-threaded) server.
     conn.recv_timeout = 3000;
 
     var buf: [1024]u8 = undefined;
-    const head = try read_head(conn, &buf);
-    const req = parse_request_line(head) orelse return respond(conn, "400 Bad Request", "text/plain", "bad request\n");
+    const req = web.read_request(conn, &buf) catch |err| switch (err) {
+        error.BadRequest => return web.respond(conn, "400 Bad Request", "text/plain", "bad request\n"),
+        else => return err,
+    };
     std.log.info("{s} {s}{s}{s}", .{ req.method, req.path, if (req.query.len > 0) "?" else "", req.query });
 
     if (std.mem.eql(u8, req.path, "/")) {
-        if (!std.mem.eql(u8, req.method, "GET")) return respond(conn, "405 Method Not Allowed", "text/plain", "GET only\n");
-        return respond(conn, "200 OK", "text/html; charset=utf-8", page);
+        if (!std.mem.eql(u8, req.method, "GET")) return web.respond(conn, "405 Method Not Allowed", "text/plain", "GET only\n");
+        return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
     }
     if (std.mem.eql(u8, req.path, "/state")) {
         return respond_state(conn);
     }
     if (std.mem.eql(u8, req.path, "/set")) {
-        if (!std.mem.eql(u8, req.method, "POST")) return respond(conn, "405 Method Not Allowed", "text/plain", "POST only\n");
-        update_state(req.query) catch return respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
+        if (!std.mem.eql(u8, req.method, "POST")) return web.respond(conn, "405 Method Not Allowed", "text/plain", "POST only\n");
+        update_state(req.query) catch return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
         try apply_state();
         return respond_state(conn);
     }
-    return respond(conn, "404 Not Found", "text/plain", "not found\n");
-}
-
-/// Reads until the end of the request headers. The request body, if any, is ignored.
-fn read_head(conn: *lwip.c.netconn, buf: []u8) ![]const u8 {
-    var len: usize = 0;
-    while (std.mem.indexOf(u8, buf[0..len], "\r\n\r\n") == null) {
-        if (len == buf.len) return error.RequestTooLarge;
-
-        var nb: ?*lwip.c.netbuf = null;
-        try lwip.c_err(lwip.c.netconn_recv(conn, &nb));
-        defer lwip.c.netbuf_delete(nb);
-
-        // A netbuf can be a chain of fragments.
-        while (true) {
-            var ptr: ?*anyopaque = null;
-            var n: u16 = 0;
-            try lwip.c_err(lwip.c.netbuf_data(nb, &ptr, &n));
-            const chunk = @as([*]const u8, @ptrCast(ptr))[0..n];
-            const take = @min(chunk.len, buf.len - len);
-            @memcpy(buf[len..][0..take], chunk[0..take]);
-            len += take;
-            if (lwip.c.netbuf_next(nb) < 0) break;
-        }
-    }
-    return buf[0..len];
-}
-
-fn parse_request_line(head: []const u8) ?Request {
-    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return null;
-    var it = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
-    const method = it.next() orelse return null;
-    const target = it.next() orelse return null;
-    const q = std.mem.indexOfScalar(u8, target, '?');
-    return .{
-        .method = method,
-        .path = target[0 .. q orelse target.len],
-        .query = if (q) |i| target[i + 1 ..] else "",
-    };
+    return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
 }
 
 fn update_state(query: []const u8) !void {
     var next = state;
-    var it = std.mem.tokenizeScalar(u8, query, '&');
+    var it = web.params(query);
     while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return error.BadParameter;
-        const key = pair[0..eq];
-        const value = try std.fmt.parseInt(u8, pair[eq + 1 ..], 10);
+        const key, const raw = web.split_param(pair) orelse return error.BadParameter;
+        const value = try std.fmt.parseInt(u8, raw, 10);
         if (std.mem.eql(u8, key, "on")) {
             next.on = value != 0;
         } else if (std.mem.eql(u8, key, "r")) {
@@ -214,18 +172,7 @@ fn respond_state(conn: *lwip.c.netconn) !void {
     const json = try std.fmt.bufPrint(&body, "{{\"on\":{},\"r\":{},\"g\":{},\"b\":{}}}", .{
         state.on, state.color.r, state.color.g, state.color.b,
     });
-    return respond(conn, "200 OK", "application/json", json);
-}
-
-fn respond(conn: *lwip.c.netconn, status: []const u8, content_type: []const u8, body: []const u8) !void {
-    var head: [160]u8 = undefined;
-    const header = try std.fmt.bufPrint(&head, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len });
-    try write_all(conn, header);
-    try write_all(conn, body);
-}
-
-fn write_all(conn: *lwip.c.netconn, bytes: []const u8) !void {
-    try lwip.c_err(lwip.c.netconn_write_partly(conn, bytes.ptr, bytes.len, lwip.c.NETCONN_COPY, null));
+    return web.respond(conn, "200 OK", "application/json", json);
 }
 
 const page = @embedFile("page.html");

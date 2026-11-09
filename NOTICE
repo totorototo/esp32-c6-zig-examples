@@ -6,7 +6,7 @@ hue/src/ili9341.zig
     "Written by Limor Fried/Ladyada for Adafruit Industries.
      MIT license, all text above must be included in any redistribution"
 
-weblight/src/lwip/, hue/src/lwip/
+common/src/lwip/, common/src/net.zig
   lwIP glue adapted from MicroZig's examples/espressif/esp tcp_server example
   (https://github.com/ZigEmbeddedGroup/microzig); altered here (LWIP_SO_RCVTIMEO on).
   MicroZig's zlib license:

@@ -5,8 +5,9 @@ ESP32-C6-DevKitC-1 (WS2812 on GPIO8) on and off and sets its colour.
 
 Fetches MicroZig from the `esp32-c6` branch of
 [totorototo/microzig](https://github.com/totorototo/microzig), pinned in `build.zig.zon`, with
-its `modules/lwip` and `modules/foundation-libc` (see the top-level README). `src/lwip/` is the
-lwIP glue from MicroZig's `tcp_server` example, with `LWIP_SO_RCVTIMEO` turned on.
+its `modules/lwip` and `modules/foundation-libc` (see the top-level README). Wi-Fi bring-up,
+the lwIP glue (from MicroZig's `tcp_server` example, with `LWIP_SO_RCVTIMEO` turned on) and the
+HTTP helpers live in [`../common`](../common), shared with `hue`.
 
 ## Build
 

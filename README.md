@@ -13,6 +13,11 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 
 Each directory is its own Zig package: `cd` into it and follow its README.
 
+[`common`](common) is not an example: it holds the networking code `weblight` and `hue`
+share (Wi-Fi bring-up, lwIP's OS glue and `lwipopts.h`, small HTTP helpers). They depend on it
+by path and call `common.add_net(...)` from their `build.zig`, which builds lwIP and adds a
+`net` module to the firmware. To copy one of them out of this repo, take `common/` along.
+
 ## Requirements
 
 - Zig **0.17.1** exactly (`minimum_zig_version`; MicroZig tracks Zig closely).
@@ -52,7 +57,7 @@ build fetches exactly that commit:
 
 The fork's root `build.zig.zon` differs from upstream so it can be fetched by git URL: it
 includes the whole tree and exposes `modules/lwip` and `modules/foundation-libc`, which
-`weblight` and `hue` reach through `mz_dep.builder.lazyDependency(...)`.
+`common/build.zig` reaches through `mz_dep.builder.lazyDependency(...)`.
 
 To move every example to a newer commit of the fork:
 

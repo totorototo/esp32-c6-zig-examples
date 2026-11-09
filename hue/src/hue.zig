@@ -1,6 +1,6 @@
 //! Minimal Philips Hue bridge client: local API v1 over plain HTTP (port 80).
 const std = @import("std");
-const net = @import("net.zig");
+const net = @import("net");
 const lwip = net.lwip;
 
 const log = std.log.scoped(.hue);

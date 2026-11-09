@@ -1,4 +1,4 @@
-//! Tiny HTTP/1.1 server helpers (from weblight): one request per connection.
+//! Tiny HTTP/1.1 server helpers: one request per connection, closed after the reply.
 const std = @import("std");
 const net = @import("net.zig");
 const lwip = net.lwip;
