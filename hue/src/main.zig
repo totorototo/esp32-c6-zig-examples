@@ -139,28 +139,32 @@ pub fn main() !void {
     } else try pair(bridge);
 
     const ctx: catalog.Context = .{ .bridge = bridge, .user = user, .allocator = heap.allocator() };
-    catalog.refresh(ctx, .light) catch |err| {
-        // The common cause: a username from another bridge, or one deleted in the Hue app.
-        if (err == error.BridgeError) {
-            if (from_flash) {
-                std.log.err("the bridge rejected the saved username: forgetting it, pairing again", .{});
-                settings.erase(.user);
-                restart();
+    while (true) {
+        if (catalog.refresh(ctx, .light)) |_| break else |err| {
+            // The common cause: a username from another bridge, or one deleted in the Hue app.
+            if (err == error.BridgeError) {
+                if (from_flash) {
+                    std.log.err("the bridge rejected the saved username: forgetting it, pairing again", .{});
+                    settings.erase(.user);
+                    restart();
+                }
+                std.log.err("the bridge rejected -Dhue_user: rebuild without it to pair again", .{});
+                halt(.failed, "BRIDGE REJECTED\nTHE USERNAME");
             }
-            std.log.err("rebuild without -Dhue_user to pair again", .{});
+            // Anything else (a timeout, a bridge busy rebooting) can pass: try again.
+            std.log.warn("lights not read ({t}): retrying in {} s", .{ err, retry_ms / 1000 });
+            status(.failed, "BRIDGE NOT\nRESPONDING");
+            wait_or_forget(retry_ms);
         }
-        status(.failed, "BRIDGE REJECTED\nTHE USERNAME");
-        return err;
-    };
+    }
     catalog.refresh(ctx, .group) catch |err| std.log.warn("rooms and zones not read: {t}", .{err});
     catalog.refresh_scenes(ctx) catch |err| std.log.warn("scenes not read: {t}", .{err});
     catalog.log_all();
 
     if (config.hue_light.len > 0) {
         if (!catalog.select_id(.light, config.hue_light)) {
-            std.log.err("no light {s} on this bridge", .{config.hue_light});
-            status(.failed, "NO SUCH LIGHT\nSEE THE LOG");
-            return error.NoSuchLight;
+            std.log.err("no light {s} on this bridge: rebuild with another -Dhue_light", .{config.hue_light});
+            halt(.failed, "NO SUCH LIGHT\nSEE THE LOG");
         }
     } else {
         // The light or room last opened, if it still exists.
@@ -175,8 +179,7 @@ pub fn main() !void {
     } else if (!config.screen) {
         // Without the screen, nothing else can pick a light.
         std.log.info("rebuild with -Dhue_light=<id> to control one of these", .{});
-        status(.ok, "LIGHTS LISTED\nSEE THE LOG");
-        return;
+        halt(.ok, "LIGHTS LISTED\nSEE THE LOG");
     }
     try control(ctx);
 }
@@ -257,12 +260,12 @@ fn reach(b: hue.Bridge) bool {
     return true;
 }
 
-/// Pairs with the bridge and saves the username. Returns it, or restarts after 60 s
-/// without a link button press.
+/// Pairs with the bridge and saves the username. Waits for the link button as long as it
+/// takes: someone setting the remote up may be anywhere in the house.
 fn pair(bridge: hue.Bridge) ![]const u8 {
-    std.log.info("pairing: press the round link button on the bridge (trying for 60 s)", .{});
+    std.log.info("pairing: press the round link button on the bridge", .{});
     status(.waiting, "PRESS THE LINK\nBUTTON ON BRIDGE");
-    for (0..30) |_| {
+    while (true) {
         var arena: std.heap.ArenaAllocator = .init(heap.allocator());
         defer arena.deinit();
         if (try hue.create_user(arena.allocator(), bridge, devicetype)) |user| {
@@ -275,11 +278,15 @@ fn pair(bridge: hue.Bridge) ![]const u8 {
             status(.ok, "PAIRED");
             return user_buf[0..user.len];
         }
-        rtos.sleep(.from_ms(2000));
+        wait_or_forget(2000);
     }
-    std.log.err("link button not pressed in time; restart to try again", .{});
-    status(.failed, "NO LINK BUTTON\nRESTART TO RETRY");
-    return error.NotPaired;
+}
+
+/// For what the board can't fix by itself (a build option that doesn't match the bridge):
+/// shows `text` and stays there. Holding BOOT still forgets the settings and restarts.
+fn halt(kind: Status, text: []const u8) noreturn {
+    status(kind, text);
+    while (true) wait_or_forget(60_000);
 }
 
 /// Forgets what pairing and discovery saved, then restarts.

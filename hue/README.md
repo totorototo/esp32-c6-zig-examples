@@ -7,8 +7,8 @@ HTTPS-only, and there is no TLS stack in the firmware.
    still answers there), else an mDNS search for `_hue._tcp.local` on the LAN. The bridge
    that answers `/api/config` (no pairing needed) is logged and saved.
 2. **Get a username:** `-Dhue_user` if given, else the one saved in flash, else **pairing**:
-   press the round link button on the bridge; for 60 s the board retries `POST /api`. The
-   new username is saved, so this happens once. If the bridge later rejects a saved
+   press the round link button on the bridge, whenever you get to it: the board retries
+   `POST /api` every 2 s until it works. The new username is saved, so this happens once. If the bridge later rejects a saved
    username (deleted in the Hue app), the board forgets it and pairs again.
 3. **Lists** every light, room, zone and scene in the log.
 4. **Control:**
@@ -16,7 +16,9 @@ HTTPS-only, and there is no TLS stack in the firmware.
      - **List**: `LIGHTS | ROOMS | SCENES` tabs, six rows a page with `< 1/2 >` paging.
        On lights and rooms, tap a row's swatch to toggle it, its name to open its
        settings. On scenes (each with its room below its name), tap a row to recall the
-       scene on that room; the last one recalled is highlighted.
+       scene on that room; the last one recalled is highlighted, and the room's state is
+       re-read right away. The first row, `<  ROOM  >`, steps through ALL ROOMS and each
+       room with scenes; opening a room picks its scenes.
      - **Settings**: `<` back, tap ON/OFF, drag the brightness bar or the colour strip,
        tap WHITE. A room or zone is set through `/groups/<id>/action`, all its lights
        at once.
@@ -35,6 +37,11 @@ HTTPS-only, and there is no TLS stack in the firmware.
 
    Everything runs in one loop: `netconn_accept` with a 20 ms timeout doubles as the
    touch polling tick, so there is no second task and no locking.
+
+**When something is wrong**, the board says so on the screen and the LED, and never
+panics. What can pass (no bridge yet, bridge not answering) is retried every 10 s. What
+needs you (a `-Dhue_user` the bridge rejects, an unknown `-Dhue_light`) stays on screen
+until you rebuild.
 
 **Starting over:** hold the BOOT button for 3 s (or `curl -X POST http://<board>/forget`).
 The board forgets the bridge, the username and the selection, and restarts.

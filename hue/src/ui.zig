@@ -106,13 +106,22 @@ fn row_rect(r: usize) Rect {
     return .{ .x = 0, .y = @intCast(rows_y + r * row_h), .w = lcd.width, .h = row_h };
 }
 
-pub fn page_count(entries: usize) u8 {
-    return @intCast(@max(1, (entries + rows_per_page - 1) / rows_per_page));
+/// Rows of entries per page: the SCENES tab gives its first row to the room filter.
+pub fn rows_for(tab: Tab) u8 {
+    return if (tab == .scenes) rows_per_page - 1 else rows_per_page;
+}
+
+pub fn page_count(tab: Tab, entries: usize) u8 {
+    const per = rows_for(tab);
+    return @intCast(@max(1, (entries + per - 1) / per));
 }
 
 pub const ListHit = union(enum) {
     none,
     tab: Tab,
+    /// The room filter's arrows (SCENES tab).
+    filter_prev,
+    filter_next,
     /// Indices into the tab's entries.
     toggle: usize,
     open: usize,
@@ -120,14 +129,18 @@ pub const ListHit = union(enum) {
     next,
 };
 
-pub fn list_hit(p: Point, page: u8, entries: usize) ListHit {
+pub fn list_hit(p: Point, tab: Tab, page: u8, entries: usize) ListHit {
     if (p.y < tab_h) return .{ .tab = @enumFromInt(@min(p.x / (lcd.width / 3), 2)) };
     if (prev_button.contains(p, 0)) return .prev;
     if (next_button.contains(p, 0)) return .next;
     if (p.y < rows_y) return .none;
-    const r = (p.y - rows_y) / row_h;
+    var r = (p.y - rows_y) / row_h;
     if (r >= rows_per_page) return .none;
-    const i = @as(usize, page) * rows_per_page + r;
+    if (tab == .scenes) {
+        if (r == 0) return if (p.x < lcd.width / 2) .filter_prev else .filter_next;
+        r -= 1;
+    }
+    const i = @as(usize, page) * rows_for(tab) + r;
     if (i >= entries) return .none;
     return if (p.x < swatch_hit_w) .{ .toggle = i } else .{ .open = i };
 }
@@ -184,29 +197,52 @@ const ListShown = struct {
     tab: Tab,
     page: u8,
     pages: u8,
+    filter_buf: [32]u8 = @splat(0),
+    filter_len: u8 = 0,
     rows: [rows_per_page]RowShown,
 };
 
-/// Draws page `page` of `pages`. `rows` are that page's rows (at most `rows_per_page`).
-pub fn render_list(tab: Tab, page: u8, pages: u8, rows: []const Row) void {
+/// Draws page `page` of `pages`. `rows` are that page's rows (at most `rows_for(tab)`).
+/// On the SCENES tab, `filter` labels the room filter drawn in the first row.
+pub fn render_list(tab: Tab, page: u8, pages: u8, rows: []const Row, filter: []const u8) void {
     var now: ListShown = .{ .tab = tab, .page = page, .pages = pages, .rows = @splat(.{}) };
-    for (rows, 0..) |row, r| now.rows[r] = .of(row);
+    const first_row: usize = if (tab == .scenes) 1 else 0;
+    for (rows, first_row..) |row, r| now.rows[r] = .of(row);
+    if (tab == .scenes) {
+        now.filter_len = @intCast(@min(filter.len, now.filter_buf.len));
+        @memcpy(now.filter_buf[0..now.filter_len], filter[0..now.filter_len]);
+    }
 
     const full = switch (shown) {
-        .list => |old| old.tab != tab or old.page != page or old.pages != now.pages,
+        .list => |old| old.tab != tab or old.page != page or old.pages != now.pages or
+            !std.mem.eql(u8, old.filter_buf[0..old.filter_len], now.filter_buf[0..now.filter_len]),
         else => true,
     };
     if (full) {
         lcd.fill(0, 0, lcd.width, lcd.height, bg);
         for (std.enums.values(Tab)) |t| draw_tab(t, t == tab);
+        if (tab == .scenes) draw_filter(now.filter_buf[0..now.filter_len]);
         if (now.pages > 1) draw_footer(page, now.pages);
         if (rows.len == 0) text_centered(row_rect(2), "NOTHING HERE", 2, dim_text, bg);
     }
-    for (now.rows, 0..) |row, r| {
+    for (now.rows[first_row..], first_row..) |row, r| {
         if (!full and std.meta.eql(row, shown.list.rows[r])) continue;
         draw_row(r, row);
     }
     shown = .{ .list = now };
+}
+
+/// The SCENES tab's first row: `<  ROOM  >`, tap either half to step through the rooms.
+fn draw_filter(label: []const u8) void {
+    const rect = row_rect(0);
+    lcd.fill(rect.x, rect.y, rect.w, rect.h - 1, panel);
+    text(margin, rect.y + 11, "<", 2, bright_text, panel);
+    text(lcd.width - margin - 10, rect.y + 11, ">", 2, bright_text, panel);
+    const inner: Rect = .{ .x = 36, .y = rect.y, .w = lcd.width - 72, .h = rect.h };
+    if (text_width(label, 2) <= inner.w)
+        text_centered(inner, label, 2, bright_text, panel)
+    else
+        text_centered(inner, label, 1, bright_text, panel);
 }
 
 fn draw_tab(t: Tab, active: bool) void {

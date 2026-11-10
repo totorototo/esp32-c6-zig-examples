@@ -276,6 +276,12 @@ pub fn recall(ctx: Context, sc: *const Scene) void {
     recalled_len = sc.id_len;
     @memcpy(recalled_buf[0..recalled_len], sc.id());
     log.info("scene `{s}` recalled on `{s}`", .{ sc.name(), sc.room() });
+
+    // Show the result now rather than at the next 5 s refresh: re-read the room, and the
+    // selected entry (which the LED mirrors), if it's something else.
+    const room = groups.find(sc.group());
+    if (room) |g| refresh_entry(ctx, g) catch |err| log.warn("room not re-read: {t}", .{err});
+    if (selected()) |e| if (e != room) refresh_entry(ctx, e) catch |err| log.warn("selection not re-read: {t}", .{err});
 }
 
 pub fn log_all() void {
