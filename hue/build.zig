@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     // The pure parts (mDNS packets, the scenes JSON, UTF-8 folding) run on the host:
     // `zig build test`.
     const test_step = b.step("test", "Run the host tests");
-    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig", "src/font.zig" }) |file| {
+    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig", "src/font.zig", "src/colour.zig" }) |file| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(file),
             .target = b.graph.host,

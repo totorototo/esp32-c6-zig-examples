@@ -56,6 +56,10 @@ its own colour, at its own brightness, with its name and level in large type.
 - **Tap:** on or off.
 - **Press and hold:** the screen turns into a colour field (hue across, saturation down,
   white at the bottom). Slide to a colour and let go to set it.
+- **Swipe up from the bottom edge** (where the dots and `^ SCENES` are): the room's scenes,
+  each a full-width band painted in the scene's own colours (the average of what it sets
+  its lights to, read from `/scenes/<id>` one scene per tick and cached). Tap a band to
+  recall it; swipe up or down to page; swipe down on the first page to go back.
 
 It browses rooms (lights only when the bridge has no rooms). The web remote and the LED
 follow the room on screen. `-Ddemo=true` runs either UI on made-up rooms without Wi-Fi

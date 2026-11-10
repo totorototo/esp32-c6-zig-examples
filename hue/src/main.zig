@@ -332,6 +332,20 @@ fn demo() noreturn {
     for (rooms) |r| catalog.add(&catalog.groups, .group, r[0], r[1], r[2]);
     catalog.add(&catalog.lights, .light, "2", "Hue color spot 1", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 });
     catalog.add(&catalog.lights, .light, "3", "Étoile", .{ .on = false, .bri = 120 });
+    const scenes = [_]struct { []const u8, []const u8, []const u8, @import("colour.zig").Rgb, u8 }{
+        .{ "s1", "Détente", "1", .{ .r = 255, .g = 160, .b = 80 }, 150 },
+        .{ "s2", "Lecture", "1", .{ .r = 255, .g = 225, .b = 180 }, 254 },
+        .{ "s3", "Horizon", "1", .{ .r = 255, .g = 110, .b = 60 }, 190 },
+        .{ "s4", "Explosion de couleurs", "1", .{ .r = 190, .g = 60, .b = 255 }, 220 },
+        .{ "s5", "Vent de montagne", "1", .{ .r = 110, .g = 200, .b = 255 }, 200 },
+        .{ "s6", "Nuit", "1", .{ .r = 70, .g = 40, .b = 160 }, 30 },
+        .{ "s7", "Repos", "1", .{ .r = 255, .g = 140, .b = 60 }, 90 },
+        .{ "s8", "Concentration", "3", .{ .r = 230, .g = 240, .b = 255 }, 254 },
+    };
+    for (scenes) |sc| {
+        catalog.scenes.add(.{ .id = sc[0], .name = sc[1], .group = sc[2], .recycle = false });
+        catalog.scenes.items[catalog.scenes.len - 1].look = .{ .lit = .{ .rgb = sc[3], .bri = sc[4] } };
+    }
     catalog.select(&catalog.groups.items[0]);
 
     const ctx: catalog.Context = .{ .bridge = hue.Bridge.from_octets(.{ 0, 0, 0, 0 }), .user = "", .allocator = heap.allocator() };

@@ -6,6 +6,8 @@
 //!   tap                  on / off
 //!   press and hold       the whole screen becomes a colour field (hue across, saturation
 //!                        down); slide to a colour, let go to set it
+//!   swipe up from the    the room's scenes, each a full-width band in the scene's own
+//!   bottom edge          colours; tap one to recall it, swipe to page, down to close
 //!
 //! Same interface as screen.zig, so main.zig picks one at comptime. Lights are browsed only
 //! when the bridge has no rooms.
@@ -24,7 +26,7 @@ const log = std.log.scoped(.field);
 pub var touch_ok = false;
 var refresh_wanted = false;
 
-const Mode = enum { room, colour };
+const Mode = enum { room, colour, scenes };
 var mode: Mode = .room;
 
 // ---- what is browsed ----
@@ -78,7 +80,45 @@ pub fn refresh(ctx: catalog.Context) !void {
 
 pub fn tick(ctx: catalog.Context, t: u64) void {
     if (touch_ok or config.demo) poll(ctx, t);
+    // Scene colours come from one request each: fetch the first one on screen still
+    // missing, one per tick, so the sheet fills in without stalling touch.
+    if (mode == .scenes and !gesture.down) {
+        for (sheet_scenes()) |i| if (catalog.scenes.items[i].look == .unknown) {
+            catalog.load_look(ctx, &catalog.scenes.items[i]);
+            break;
+        };
+    }
     render();
+}
+
+// ---- the room's scenes ----
+
+var scene_index_buf: [catalog.max_scenes]u8 = undefined;
+
+/// Indices into `catalog.scenes` of the current room's scenes.
+fn room_scenes() []const u8 {
+    const e = current() orelse return &.{};
+    if (e.kind != .group) return &.{};
+    var n: usize = 0;
+    for (catalog.scenes.slice(), 0..) |*sc, i| if (std.mem.eql(u8, sc.group(), e.id())) {
+        scene_index_buf[n] = @intCast(i);
+        n += 1;
+    };
+    return scene_index_buf[0..n];
+}
+
+const bands_per_page = 5;
+var sheet_page: usize = 0;
+
+/// The scenes on the sheet's current page.
+fn sheet_scenes() []const u8 {
+    const all = room_scenes();
+    const first = @min(sheet_page * bands_per_page, all.len);
+    return all[first..@min(first + bands_per_page, all.len)];
+}
+
+fn sheet_pages() usize {
+    return @max(1, (room_scenes().len + bands_per_page - 1) / bands_per_page);
 }
 
 // ---- gestures ----
@@ -91,10 +131,12 @@ const dim_px = 16;
 /// A drag over this many pixels spans the whole brightness range.
 const dim_span_px = 200;
 const send_ms = 150;
+/// Swipes starting below this line (the dots and the hint) open the scenes.
+const edge_y = 262;
 
 const Gesture = struct {
     down: bool = false,
-    kind: enum { undecided, swipe, dim, hold } = .undecided,
+    kind: enum { undecided, swipe, dim, hold, edge } = .undecided,
     start: Point = .{ .x = 0, .y = 0 },
     start_t: u64 = 0,
     last: Point = .{ .x = 0, .y = 0 },
@@ -121,11 +163,16 @@ fn poll(ctx: catalog.Context, t: u64) void {
         gesture.last = p;
         const dx = @as(i32, p.x) - gesture.start.x;
         const dy = @as(i32, p.y) - gesture.start.y;
+        if (mode == .scenes) return; // the sheet acts on release
         switch (gesture.kind) {
             .undecided => {
                 if (@abs(dx) > swipe_px and @abs(dx) > 2 * @abs(dy)) {
                     gesture.kind = .swipe;
-                } else if (@abs(dy) > dim_px and @abs(dy) >= @abs(dx) and e.state.bri != null) {
+                } else if (gesture.start.y >= edge_y and dy < -swipe_px and room_scenes().len > 0) {
+                    gesture.kind = .edge;
+                    mode = .scenes;
+                    sheet_page = 0;
+                } else if (gesture.start.y < edge_y and @abs(dy) > dim_px and @abs(dy) >= @abs(dx) and e.state.bri != null) {
                     gesture.kind = .dim;
                 } else if (t - gesture.start_t >= hold_ms and @abs(dx) < still_px and @abs(dy) < still_px and e.state.hue != null) {
                     gesture.kind = .hold;
@@ -139,7 +186,7 @@ fn poll(ctx: catalog.Context, t: u64) void {
                 pending = .{ .on = true, .bri = @intCast(bri) };
             },
             .hold => pending = colour_at(p),
-            .swipe => {},
+            .swipe, .edge => {},
         }
     } else if (gesture.down) {
         gesture.misses += 1;
@@ -155,16 +202,46 @@ fn poll(ctx: catalog.Context, t: u64) void {
 
 fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
     const dx = @as(i32, gesture.last.x) - gesture.start.x;
+    const dy = @as(i32, gesture.last.y) - gesture.start.y;
+    if (mode == .scenes and gesture.kind != .edge) {
+        sheet_release(ctx, dy);
+        gesture = .{};
+        return;
+    }
     switch (gesture.kind) {
         .undecided => if (t - gesture.start_t < tap_ms + 3 * 20) {
             catalog.apply(ctx, e, .{ .on = !e.state.on });
         },
         .swipe => step(dx < 0),
         .dim, .hold => if (pending) |c| catalog.apply(ctx, e, c),
+        .edge => {
+            gesture = .{};
+            return; // the sheet stays open
+        },
     }
     pending = null;
     mode = .room;
     gesture = .{};
+}
+
+/// On the sheet: swipe up / down pages (down from the first page closes), a tap on a band
+/// recalls its scene and closes, a tap on the header closes.
+fn sheet_release(ctx: catalog.Context, dy: i32) void {
+    if (dy < -swipe_px) {
+        if (sheet_page + 1 < sheet_pages()) sheet_page += 1;
+        return;
+    }
+    if (dy > swipe_px) {
+        if (sheet_page == 0) mode = .room else sheet_page -= 1;
+        return;
+    }
+    const y = gesture.start.y;
+    if (y >= sheet_header_h) {
+        const band = (y - sheet_header_h) / band_h;
+        const on_page = sheet_scenes();
+        if (band < on_page.len) catalog.recall(ctx, &catalog.scenes.items[on_page[band]]);
+    }
+    mode = .room;
 }
 
 // ---- drawing: the room ----
@@ -180,6 +257,7 @@ const RoomShown = struct {
     pct: ?u8 = null,
     index: usize = 0,
     count: usize = 0,
+    has_scenes: bool = false,
 };
 var shown: ?RoomShown = null;
 /// Rows of the colour field drawn so far: it's drawn a slice per tick, so touch keeps
@@ -190,16 +268,18 @@ const rows_per_tick = 30;
 fn render() void {
     if (mode == .colour) return render_colour();
     field_rows = 0;
+    if (mode == .scenes) return render_sheet();
+    sheet_shown = null;
     const e = current() orelse return;
     const state = preview(e.state);
 
-    var now: RoomShown = .{ .bg = ui.to565(bg_of(state)), .index = index_of(e) orelse 0, .count = entries().len };
+    var now: RoomShown = .{ .bg = ui.to565(bg_of(state, null)), .index = index_of(e) orelse 0, .count = entries().len, .has_scenes = room_scenes().len > 0 };
     now.id_len = e.id_len;
     @memcpy(now.id_buf[0..e.id_len], e.id());
     now.pct = if (state.on) @intCast((@as(u32, state.bri orelse 254) * 100 + 127) / 254) else null;
     if (shown) |old| if (std.meta.eql(old, now)) return;
 
-    const fg = ui.to565(fg_on(bg_of(state)));
+    const fg = ui.to565(fg_on(bg_of(state, null)));
     const same_room = if (shown) |old| std.mem.eql(u8, old.id_buf[0..old.id_len], now.id_buf[0..now.id_len]) else false;
     if (same_room and wipe == .none) {
         // Same room, new level: repaint everything (the background is the level).
@@ -211,7 +291,10 @@ fn render() void {
     const big = if (now.pct) |pct| std.fmt.bufPrint(&buf, "{}%", .{pct}) catch unreachable else "OFF";
     ui.text_centered(.{ .x = 0, .y = 120, .w = lcd.width, .h = 60 }, big, 7, fg, now.bg);
     draw_dots(now.index, now.count, fg, now.bg);
-    ui.text_centered(.{ .x = 0, .y = 302, .w = lcd.width, .h = 10 }, "SWIPE  DRAG  TAP  HOLD", 1, fg, now.bg);
+    if (now.has_scenes) {
+        draw_chevron(lcd.width / 2, 288, fg);
+        ui.text_centered(.{ .x = 0, .y = 302, .w = lcd.width, .h = 10 }, "SCENES", 1, fg, now.bg);
+    } else ui.text_centered(.{ .x = 0, .y = 302, .w = lcd.width, .h = 10 }, "SWIPE  DRAG  TAP  HOLD", 1, fg, now.bg);
     shown = now;
 }
 
@@ -250,6 +333,80 @@ fn draw_dots(index: usize, count: usize, fg: lcd.Color, bg: lcd.Color) void {
     }
 }
 
+/// A small upward chevron centred on `x`, its tip at `y`.
+fn draw_chevron(x: u16, y: u16, c: lcd.Color) void {
+    for (0..6) |i| {
+        const d: u16 = @intCast(i);
+        lcd.fill(x - d - 1, y + d, 2, 2, c);
+        lcd.fill(x + d - 1, y + d, 2, 2, c);
+    }
+}
+
+// ---- drawing: the scenes sheet ----
+
+const sheet_header_h = 40;
+const band_h = (lcd.height - sheet_header_h) / bands_per_page; // 56
+
+const BandShown = struct {
+    present: bool = false,
+    bg: lcd.Color = 0,
+    recalled: bool = false,
+    index: u8 = 0,
+};
+const SheetShown = struct {
+    page: usize,
+    pages: usize,
+    bands: [bands_per_page]BandShown,
+};
+var sheet_shown: ?SheetShown = null;
+
+fn render_sheet() void {
+    const on_page = sheet_scenes();
+    var now: SheetShown = .{ .page = sheet_page, .pages = sheet_pages(), .bands = @splat(.{}) };
+    for (on_page, 0..) |i, b| {
+        const sc = &catalog.scenes.items[i];
+        now.bands[b] = .{ .present = true, .bg = ui.to565(band_colour(sc)), .recalled = catalog.is_recalled(sc), .index = i };
+    }
+    const full = if (sheet_shown) |old| old.page != now.page or old.pages != now.pages else true;
+    if (full) {
+        shown = null; // the room view repaints in full afterwards
+        const head = lcd.rgb(14, 14, 18);
+        lcd.fill(0, 0, lcd.width, sheet_header_h, head);
+        const e = current();
+        var buf: [48]u8 = undefined;
+        const title = std.fmt.bufPrint(&buf, "{s}  {}/{}", .{ if (e) |x| x.name() else "", now.page + 1, now.pages }) catch "";
+        const r: ui.Rect = .{ .x = 8, .y = 0, .w = lcd.width - 16, .h = sheet_header_h };
+        ui.text_centered(r, title, if (ui.text_width(title, 2) <= r.w) 2 else 1, lcd.rgb(240, 240, 240), head);
+    }
+    for (now.bands, 0..) |band, b| {
+        if (!full and std.meta.eql(band, sheet_shown.?.bands[b])) continue;
+        draw_band(b, band);
+    }
+    sheet_shown = now;
+}
+
+fn band_colour(sc: *const catalog.Scene) ui.Rgb {
+    return switch (sc.look) {
+        .unknown => .{ .r = 44, .g = 44, .b = 50 }, // still loading
+        .dark => .{ .r = 14, .g = 14, .b = 18 },
+        .lit => |l| bg_of(.{ .on = true, .bri = l.bri, .hue = null, .sat = null }, l.rgb),
+    };
+}
+
+fn draw_band(b: usize, band: BandShown) void {
+    const y: u16 = @intCast(sheet_header_h + b * band_h);
+    const bg = if (band.present) band.bg else lcd.rgb(14, 14, 18);
+    lcd.fill(0, y, lcd.width, band_h, bg);
+    if (!band.present) return;
+    const sc = &catalog.scenes.items[band.index];
+    const fg = ui.to565(fg_on(band_colour(sc)));
+    const name = sc.name();
+    const r: ui.Rect = .{ .x = 16, .y = y, .w = lcd.width - 48, .h = band_h };
+    const scale: u16 = if (ui.text_width(name, 2) <= r.w) 2 else 1;
+    ui.text(r.x, y + (band_h - 7 * scale) / 2, name, scale, fg, bg);
+    if (band.recalled) lcd.fill(lcd.width - 26, y + band_h / 2 - 5, 10, 10, fg);
+}
+
 fn preview(state: hue.LightState) hue.LightState {
     var v = state;
     const c = pending orelse return v;
@@ -262,9 +419,9 @@ fn preview(state: hue.LightState) hue.LightState {
 
 /// The room's colour at its brightness. Even at 1% it stays recognisably that colour: the
 /// screen is a picture of the light, not a power meter.
-fn bg_of(s: hue.LightState) ui.Rgb {
+fn bg_of(s: hue.LightState, base_override: ?ui.Rgb) ui.Rgb {
     if (!s.on) return .{ .r = 14, .g = 14, .b = 18 };
-    const base: ui.Rgb = if (s.hue != null and s.sat != null) ui.hsv_to_rgb(s.hue.?, s.sat.?) else .{ .r = 255, .g = 190, .b = 110 };
+    const base: ui.Rgb = base_override orelse if (s.hue != null and s.sat != null) ui.hsv_to_rgb(s.hue.?, s.sat.?) else .{ .r = 255, .g = 190, .b = 110 };
     const level: u32 = 60 + @as(u32, s.bri orelse 254) * 195 / 254;
     return .{
         .r = @intCast(@as(u32, base.r) * level / 255),
@@ -394,6 +551,9 @@ const demo_script = [_]Stroke{
     .{ .from = 8500, .to = 9300, .a = .{ .x = 60, .y = 150 }, .b = .{ .x = 60, .y = 150 } }, // hold: colour field
     .{ .from = 9300, .to = 12300, .a = .{ .x = 60, .y = 150 }, .b = .{ .x = 190, .y = 70 } }, // slide, then let go
     .{ .from = 14000, .to = 14250, .a = .{ .x = 40, .y = 160 }, .b = .{ .x = 200, .y = 160 } }, // swipe back
+    .{ .from = 16000, .to = 16300, .a = .{ .x = 120, .y = 300 }, .b = .{ .x = 120, .y = 180 } }, // up from the edge: scenes
+    .{ .from = 18000, .to = 18300, .a = .{ .x = 120, .y = 260 }, .b = .{ .x = 120, .y = 120 } }, // swipe up: next page
+    .{ .from = 19500, .to = 19600, .a = .{ .x = 120, .y = 124 }, .b = .{ .x = 120, .y = 124 } }, // tap the 2nd band: recall
 };
 var demo_t0: ?u64 = null;
 

@@ -184,6 +184,8 @@ pub const Scene = struct {
     /// Empty for a LightScene, which belongs to no room.
     group_buf: [8]u8 = undefined,
     group_len: u8 = 0,
+    /// What it looks like, read from the scene's light states on first use (see `look_of`).
+    look: union(enum) { unknown, dark, lit: hue.Look } = .unknown,
 
     pub fn id(s: *const Scene) []const u8 {
         return s.id_buf[0..s.id_len];
@@ -261,7 +263,26 @@ pub fn refresh_scenes(ctx: Context) !void {
     try hue.get_scenes(arena.allocator(), ctx.bridge, ctx.user, fresh);
     if (fresh.dropped > 0) log.warn("{} scenes left out: the list holds {}", .{ fresh.dropped, max_scenes });
     std.mem.sort(Scene, fresh.slice(), {}, scene_less);
+    // Keep the looks already read: they cost one request per scene.
+    for (fresh.slice()) |*sc| for (scenes.slice()) |*old| if (std.mem.eql(u8, old.id(), sc.id())) {
+        sc.look = old.look;
+        break;
+    };
     scenes = fresh.*;
+}
+
+/// Reads what `sc` looks like if that isn't known yet. One request; call it for the
+/// scenes on screen, one per tick.
+pub fn load_look(ctx: Context, sc: *Scene) void {
+    if (sc.look != .unknown or offline) return;
+    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
+    defer arena.deinit();
+    const look = hue.get_scene_look(arena.allocator(), ctx.bridge, ctx.user, sc.id()) catch |err| {
+        log.warn("scene {s} not read: {t}", .{ sc.id(), err });
+        sc.look = .dark; // don't retry every tick
+        return;
+    };
+    sc.look = if (look) |l| .{ .lit = l } else .dark;
 }
 
 fn scene_less(_: void, a: Scene, b: Scene) bool {
@@ -275,13 +296,23 @@ fn scene_less(_: void, a: Scene, b: Scene) bool {
 pub fn recall(ctx: Context, sc: *const Scene) void {
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
-    hue.recall_scene(arena.allocator(), ctx.bridge, ctx.user, sc.group(), sc.id()) catch |err| {
+    if (!offline) hue.recall_scene(arena.allocator(), ctx.bridge, ctx.user, sc.group(), sc.id()) catch |err| {
         log.err("recall scene {s} failed: {t}", .{ sc.id(), err });
         return;
     };
     recalled_len = sc.id_len;
     @memcpy(recalled_buf[0..recalled_len], sc.id());
     log.info("scene `{s}` recalled on `{s}`", .{ sc.name(), sc.room() });
+
+    // Offline (-Ddemo), nothing re-reads the room: give it the scene's look directly.
+    if (offline) if (groups.find(sc.group())) |g| switch (sc.look) {
+        .lit => |l| {
+            const hs = @import("colour.zig").rgb_to_hue_sat(l.rgb);
+            g.state = .{ .on = true, .bri = l.bri, .hue = hs.hue, .sat = hs.sat };
+        },
+        .dark => g.state.on = false,
+        .unknown => {},
+    };
 
     // Show the result now rather than at the next 5 s refresh: re-read the room, and the
     // selected entry (which the LED mirrors), if it's something else.

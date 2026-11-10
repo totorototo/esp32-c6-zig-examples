@@ -20,6 +20,7 @@ const font = @import("font.zig");
 const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const Point = @import("ft6206.zig").Point;
+const colour = @import("colour.zig");
 
 pub const Rect = struct {
     x: u16,
@@ -50,7 +51,8 @@ const warn_text = lcd.rgb(255, 90, 70);
 const black = lcd.rgb(0, 0, 0);
 const warm_white: Rgb = .{ .r = 255, .g = 190, .b = 110 };
 
-pub const Rgb = struct { r: u8, g: u8, b: u8 };
+pub const Rgb = colour.Rgb;
+pub const hsv_to_rgb = colour.hsv_to_rgb;
 
 /// What the screen currently shows. Anything but the page being rendered forces a full
 /// redraw of that page.
@@ -468,23 +470,4 @@ fn glyph(x: u16, y: u16, g: font.Glyph, scale: u16, fg: lcd.Color, back: lcd.Col
 
 pub fn to565(c: Rgb) lcd.Color {
     return lcd.rgb(c.r, c.g, c.b);
-}
-
-/// Hue 0..65535, saturation 0..254, full value.
-pub fn hsv_to_rgb(h: u16, sat: u8) Rgb {
-    const s: u32 = @as(u32, @min(sat, 254)) * 255 / 254;
-    const h6: u32 = @as(u32, h) * 6; // 0 .. 6*65535
-    const sector = h6 >> 16; // 0..5
-    const f: u32 = (h6 & 0xffff) >> 8; // 0..255 within the sector
-    const p: u8 = @intCast(255 - s);
-    const q: u8 = @intCast(255 - s * f / 255);
-    const t: u8 = @intCast(255 - s * (255 - f) / 255);
-    return switch (sector) {
-        0 => .{ .r = 255, .g = t, .b = p },
-        1 => .{ .r = q, .g = 255, .b = p },
-        2 => .{ .r = p, .g = 255, .b = t },
-        3 => .{ .r = p, .g = q, .b = 255 },
-        4 => .{ .r = t, .g = p, .b = 255 },
-        else => .{ .r = 255, .g = p, .b = q },
-    };
 }

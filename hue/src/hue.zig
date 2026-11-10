@@ -4,6 +4,7 @@ const net = @import("net");
 const lwip = net.lwip;
 const mdns = @import("mdns.zig");
 const scenes = @import("scenes.zig");
+const colour = @import("colour.zig");
 
 const log = std.log.scoped(.hue);
 
@@ -207,6 +208,40 @@ pub fn get_scenes(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, si
         log.err("unexpected scenes JSON ({t}): {s}", .{ err, body[0..@min(body.len, 160)] });
         return error.BadResponse;
     };
+}
+
+/// What a scene looks like: the average colour and brightness of the lights it turns on,
+/// or null when it turns them all off.
+pub const Look = struct { rgb: colour.Rgb, bri: u8 };
+
+pub fn get_scene_look(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, scene: []const u8) !?Look {
+    var path: [112]u8 = undefined;
+    const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/scenes/{s}", .{ user, scene }), "");
+    try check_error(arena, body);
+    const State = struct {
+        on: bool = false,
+        bri: ?u8 = null,
+        xy: ?[2]f32 = null,
+        ct: ?u16 = null,
+        hue: ?u16 = null,
+        sat: ?u8 = null,
+    };
+    const detail = try parse(struct { lightstates: std.json.ArrayHashMap(State) = .{} }, arena, body);
+    var mix: colour.Mix = .{};
+    for (detail.lightstates.map.values()) |ls| {
+        if (!ls.on) continue;
+        const rgb = if (ls.xy) |xy|
+            colour.xy_to_rgb(xy[0], xy[1])
+        else if (ls.hue != null and ls.sat != null)
+            colour.hsv_to_rgb(ls.hue.?, ls.sat.?)
+        else if (ls.ct) |ct|
+            colour.ct_to_rgb(ct)
+        else
+            colour.warm_white;
+        mix.add(rgb, ls.bri orelse 254);
+    }
+    const rgb = mix.colour() orelse return null;
+    return .{ .rgb = rgb, .bri = mix.brightness() };
 }
 
 /// Recalls a scene on its group: a room or zone, or group 0 (all lights) for a LightScene.
