@@ -1,0 +1,7 @@
+[wokwi]
+version = 1
+# Build first: zig build -Doptimize=ReleaseSmall
+firmware = "zig-out/firmware/tls.elf"
+elf = "zig-out/firmware/tls.elf"
+# Debugging: "Wokwi: Start Simulator and Wait for Debugger", then ./debug.sh
+gdbServerPort = 3333

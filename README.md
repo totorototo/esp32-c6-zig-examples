@@ -11,6 +11,7 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 | [`nvs`](nvs)             | Settings that survive a reset: flash driver and ESP-IDF's NVS format, self-check   |
 | [`oled`](oled)           | An SSD1306 128x64 display over I2C, with a 5x7 font                               |
 | [`rmt`](rmt)             | WS2812 LEDs through RMT: the on-board LED and a 16 LED ring, with a self-check    |
+| [`tls`](tls)             | HTTPS to Netatmo with Zig's TLS 1.3 client: SNTP time, pinned root, self-check   |
 | [`weblight`](weblight)   | Wi-Fi + lwIP: a web page that sets the RGB LED's colour                           |
 | [`hue`](hue)             | A Philips Hue remote: bridge pairing, local API, web remote, ILI9341 touch screen |
 | [`wifinvs`](wifinvs)     | Wi-Fi config and PHY calibration kept in NVS: saved by one boot, reused by the next |
@@ -71,7 +72,7 @@ includes the whole tree and exposes `modules/lwip` and `modules/foundation-libc`
 
 To move every example to a newer commit of the fork:
 
-    for d in blinky boot nvs oled rmt weblight hue wifinvs; do
+    for d in blinky boot nvs oled rmt tls weblight hue wifinvs; do
         (cd $d && zig fetch --save=microzig "git+https://github.com/totorototo/microzig#<commit>")
     done
 

@@ -42,6 +42,10 @@ jobs:
           - sample: rmt
             timeout: 30000
             expect: "rmt test: PASS"
+          - sample: tls
+            # Reaches api.netatmo.com and pool.ntp.org through Wokwi-GUEST.
+            timeout: 120000
+            expect: "tls test: PASS"
           - sample: weblight
             timeout: 60000
             expect: "open http://"
