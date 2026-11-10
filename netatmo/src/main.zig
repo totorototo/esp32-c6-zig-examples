@@ -19,6 +19,8 @@ const net = @import("net");
 const https = @import("https");
 const energy = @import("energy.zig");
 const settings = @import("settings.zig");
+const screen = @import("screen");
+const thermo = @import("thermo.zig");
 
 const hal = microzig.hal;
 const rtos = hal.rtos;
@@ -86,30 +88,161 @@ fn uart_log(
 
 const api = "api.netatmo.com";
 
+// Touch screen wiring, as in ../hue: SPI2 for the ILI9341, I2C on GPIO22/23 for the FT6206.
+const gpio = hal.gpio;
+const screen_pins: screen.lcd.Pins = .{
+    .sck = gpio.num(19),
+    .mosi = gpio.num(18),
+    .cs = gpio.num(20),
+    .dc = gpio.num(21),
+    .rst = gpio.num(2),
+};
+
 pub fn main() !void {
     std.log.info("netatmo on ESP32-C6", .{});
+    if (config.screen) {
+        screen.lcd.init(screen_pins);
+        if (screen.touch.init(gpio.num(22), gpio.num(23))) {
+            thermo.touch_ok = true;
+        } else |err| std.log.warn("touch controller not found ({t}): screen is display-only", .{err});
+        status("CONNECTING", .{ .r = 120, .g = 170, .b = 255 });
+    }
     // What the heap leaves for the main task's stack (not the heap's size): HTTPS needs
     // 160 KiB, see ../common/src/https.zig.
     var heap: microzig.Allocator = try .init_with_heap(160 * 1024);
     settings.init();
+
+    // Decided at runtime on purpose: a comptime `if` would make the rest dead code, and
+    // lwIP's allocator (set up by net.up) would be dropped at link time.
+    var demo_mode = config.demo;
+    _ = &demo_mode;
+    if (demo_mode) demo();
+
     try net.up(heap.allocator());
 
     run() catch |err| {
         std.log.err("netatmo test: FAIL ({t})", .{err});
+        status("ERROR\nSEE THE LOG", .{ .r = 255, .g = 90, .b = 70 });
         return;
     };
+    if (config.screen and config.test_room.len == 0) ui_loop();
+}
+
+fn status(text: []const u8, colour: screen.Rgb) void {
+    if (config.screen) thermo.message(text, colour);
+}
+
+// ---- what the screen calls ----
+
+pub fn current_home() *energy.Home {
+    return &home_state;
+}
+
+pub fn refresh_status() !void {
+    if (config.demo) return;
+    try read_status(&home_state, try auth_headers());
+}
+
+/// `temp` null: back to the schedule. Updates the local copy once the API accepted.
+pub fn set_room(r: *energy.Room, temp: ?f32) !void {
+    if (config.demo) {
+        if (temp) |t| {
+            r.setpoint = t;
+            r.mode.set("manual");
+        } else r.mode.set("schedule");
+        rtos.sleep(.from_ms(600)); // so SENDING shows
+        return;
+    }
+    const hs = try auth_headers();
+    if (temp) |t| {
+        var buf: [8]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buf, "{d:.1}", .{t});
+        const end = (https.now() orelse return error.NoTime) + manual_minutes * 60;
+        try set_room_api(&home_state, hs, r.id.slice(), "manual", text, end);
+        r.setpoint = t;
+        r.mode.set("manual");
+        std.log.info("`{s}` set to {d:.1} °C for {} min", .{ r.name.slice(), t, manual_minutes });
+    } else {
+        try set_room_api(&home_state, hs, r.id.slice(), "home", null, null);
+        std.log.info("`{s}` back to its schedule", .{r.name.slice()});
+        // The schedule's setpoint comes from the bridge.
+        try read_status(&home_state, hs);
+    }
+}
+
+/// How long a setpoint from the screen holds before the schedule takes over again: the
+/// Netatmo app's default.
+const manual_minutes = 180;
+const refresh_ms = 120_000;
+
+fn ui_loop() noreturn {
+    var last_refresh = now_ms();
+    while (true) {
+        const t = now_ms();
+        thermo.tick(t);
+        if (t - last_refresh >= refresh_ms) {
+            last_refresh = t;
+            refresh_status() catch |err| std.log.warn("refresh failed: {t}", .{err});
+        }
+        rtos.sleep(.from_ms(20));
+    }
+}
+
+fn now_ms() u64 {
+    return hal.time.get_time_since_boot().to_us() / 1000;
+}
+
+// ---- the access token, refreshed before it expires ----
+
+var access_buf: [128]u8 = undefined;
+var access_len: usize = 0;
+var access_expiry: i64 = 0;
+var auth_buf: [160]u8 = undefined;
+var auth_header: [1]https.Header = undefined;
+
+fn auth_headers() ![]const https.Header {
+    const now = https.now() orelse return error.NoTime;
+    if (access_len == 0 or now > access_expiry - 300) {
+        const token = try refresh_access_token(&access_buf);
+        access_len = token.len;
+        access_expiry = now + token_lifetime;
+        auth_header[0] = .{ .name = "Authorization", .value = try std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) };
+    }
+    return &auth_header;
+}
+
+var token_lifetime: i64 = 10800;
+
+// ---- demo: made-up rooms, no network (-Ddemo=true) ----
+
+fn demo() noreturn {
+    std.log.info("demo: made-up rooms, no network", .{});
+    const h = &home_state;
+    h.* = .{};
+    h.name.set("Demo");
+    const rooms = [_]struct { []const u8, []const u8, f32, f32, []const u8, bool, u8 }{
+        .{ "1", "Salon", 20.6, 19.0, "schedule", true, 0 },
+        .{ "2", "Bureau", 17.2, 19.5, "manual", true, 60 },
+        .{ "3", "Chambre Aloïse", 22.8, 18.0, "schedule", true, 0 },
+        .{ "4", "Salle de bain", 24.5, 22.0, "schedule", false, 0 },
+    };
+    for (rooms) |r| {
+        const room = &h.rooms[h.n_rooms];
+        room.* = .{ .in_status = true, .measured = r[2], .setpoint = r[3], .reachable = r[5], .heating = r[6] };
+        room.id.set(r[0]);
+        room.name.set(r[1]);
+        room.mode.set(r[4]);
+        h.n_rooms += 1;
+    }
+    ui_loop();
 }
 
 fn run() !void {
     try https.sync_time();
 
     // ---- OAuth: a fresh access token, and the next refresh token saved first ----
-    var token_buf: [128]u8 = undefined;
-    const access = try refresh_access_token(&token_buf);
-
-    var auth_buf: [160]u8 = undefined;
-    const auth = try std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{access});
-    const headers = [_]https.Header{.{ .name = "Authorization", .value = auth }};
+    status("SIGNING IN", .{ .r = 120, .g = 170, .b = 255 });
+    const headers = try auth_headers();
 
     // ---- homesdata ----
     const home = &home_state;
@@ -117,7 +250,8 @@ fn run() !void {
     {
         var id_buf: [32]u8 = undefined;
         const want = settings.get(.home_id, &id_buf);
-        var stream = try https.open(api, "GET", "/api/homesdata", &headers, "");
+        status("READING\nTHE HOME", .{ .r = 120, .g = 170, .b = 255 });
+        var stream = try https.open(api, "GET", "/api/homesdata", headers, "");
         defer stream.close();
         try expect_ok(&stream);
         var src = json_reader(stream.body);
@@ -131,11 +265,11 @@ fn run() !void {
     std.log.info("home `{s}` ({s}): {} rooms, {} modules", .{ home.name.slice(), home.id.slice(), home.n_rooms, home.n_modules });
 
     // ---- homestatus ----
-    try read_status(home, &headers);
+    try read_status(home, headers);
     log_home(home);
 
     // ---- optional write test ----
-    if (config.test_room.len > 0 and config.test_temp.len > 0) try setpoint_test(home, &headers);
+    if (config.test_room.len > 0 and config.test_temp.len > 0) try setpoint_test(home, headers);
 
     std.log.info("netatmo test: PASS", .{});
 }
@@ -186,6 +320,7 @@ fn refresh_access_token(buf: []u8) ![]const u8 {
     }
     if (config.log_token) std.log.info("new refresh token (rebuild with it in Wokwi): -Dnetatmo_refresh_token={s}", .{t.refresh_token});
     std.log.info("access token valid for {} min", .{t.expires_in / 60});
+    token_lifetime = t.expires_in;
 
     if (t.access_token.len > buf.len) return error.TokenTooLong;
     @memcpy(buf[0..t.access_token.len], t.access_token);
@@ -213,25 +348,25 @@ fn setpoint_test(home: *energy.Home, headers: []const https.Header) !void {
     const end = (https.now() orelse return error.NoTime) + 10 * 60;
 
     std.log.info("setting `{s}` to {d:.1} °C for 10 min", .{ room.name.slice(), temp });
-    try set_room(home, headers, config.test_room, "manual", config.test_temp, end);
+    try set_room_api(home, headers, config.test_room, "manual", config.test_temp, end);
     try read_status(home, headers);
     const now_set = home.room(config.test_room).?.setpoint orelse return error.NoSetpoint;
     std.log.info("`{s}` now: setpoint {d:.1} °C, mode {s}", .{ room.name.slice(), now_set, room.mode.slice() });
     const ok = @abs(now_set - temp) < 0.05 and room.mode.eql("manual");
 
     // Back to the schedule either way.
-    try set_room(home, headers, config.test_room, "home", null, null);
+    try set_room_api(home, headers, config.test_room, "home", null, null);
     std.log.info("`{s}` back to its schedule", .{room.name.slice()});
     if (!ok) return error.SetpointNotApplied;
 }
 
 /// POST /api/setroomthermpoint: `mode` "manual" (with `temp` and `endtime`) or "home" (back to
 /// the schedule).
-fn set_room(home: *energy.Home, headers: []const https.Header, room_id: []const u8, mode: []const u8, temp: ?[]const u8, endtime: ?i64) !void {
+fn set_room_api(home_: *energy.Home, headers: []const https.Header, room_id: []const u8, mode: []const u8, temp: ?[]const u8, endtime: ?i64) !void {
     var form_buf: [192]u8 = undefined;
     var form: std.Io.Writer = .fixed(&form_buf);
     try form.writeAll("home_id=");
-    try energy.percent_encode(&form, home.id.slice());
+    try energy.percent_encode(&form, home_.id.slice());
     try form.writeAll("&room_id=");
     try energy.percent_encode(&form, room_id);
     try form.print("&mode={s}", .{mode});

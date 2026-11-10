@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "test_room", b.option([]const u8, "netatmo_test_room", "Room id for the setpoint test") orelse "");
     options.addOption([]const u8, "test_temp", b.option([]const u8, "netatmo_test_temp", "Setpoint for the test, e.g. 19.5") orelse "");
 
+    // The ILI9341 + FT6206 touch screen (wired as in ../hue), and a demo with made-up rooms
+    // and a scripted finger, to look at the screen without credentials or a network.
+    options.addOption(bool, "screen", b.option(bool, "screen", "Touch screen (default: true)") orelse true);
+    options.addOption(bool, "demo", b.option(bool, "demo", "Demo: made-up rooms, no network") orelse false);
+
     const mz_dep = b.dependency("microzig", .{});
     const mb = MicroBuild.init(b, mz_dep) orelse return;
 
@@ -42,6 +47,7 @@ pub fn build(b: *std.Build) void {
 
     // Wi-Fi, lwIP and HTTPS (../common).
     if (!common.add_net(b, mz_dep, fw, .{ .optimize = optimize, .config = config })) return;
+    common.add_screen(b, fw);
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });

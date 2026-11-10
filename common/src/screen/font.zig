@@ -52,6 +52,8 @@ const art = [_]Entry{
     .{ '?', .{ ".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.." } },
     .{ '&', .{ ".##..", "#..#.", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#" } },
     .{ '"', .{ ".#.#.", ".#.#.", ".....", ".....", ".....", ".....", "....." } },
+    // 0x7F stands for the degree sign (U+00B0), which `Chars` folds to it.
+    .{ 0x7F, .{ ".##..", "#..#.", "#..#.", ".##..", ".....", ".....", "....." } },
     .{ '0', .{ ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###." } },
     .{ '1', .{ "..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###." } },
     .{ '2', .{ ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####" } },
@@ -92,7 +94,11 @@ const art = [_]Entry{
 
 test "punctuation used by the UI has glyphs" {
     const box = glyph(0);
-    for ("<>,?&\"") |c| try std.testing.expect(!std.mem.eql(u8, &glyph(c), &box));
+    for ("<>,?&\"\x7f") |c| try std.testing.expect(!std.mem.eql(u8, &glyph(c), &box));
+    var it: Chars = .{ .s = "20.5°" };
+    var last: u8 = 0;
+    while (it.next()) |c| last = c;
+    try std.testing.expectEqual(@as(u8, 0x7F), last);
 }
 
 test "digit one" {
@@ -141,6 +147,7 @@ fn fold(cp: u21) u8 {
         0x178 => 'Y', // Ÿ
         0x2010...0x2015 => '-', // dashes
         0x2018, 0x2019 => '\'', // curly apostrophes
+        0xB0 => 0x7F, // °
         else => 0,
     };
 }

@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
 
     // Wi-Fi, lwIP and the HTTP helpers, shared with the other Wi-Fi example (../common).
     if (!common.add_net(b, mz_dep, fw, .{ .optimize = optimize, .config = config })) return;
+    // The ILI9341 + FT6206 touch screen, font and text (../common, shared with netatmo).
+    common.add_screen(b, fw);
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
@@ -53,7 +55,8 @@ pub fn build(b: *std.Build) void {
     // The pure parts (mDNS packets, the scenes JSON, UTF-8 folding) run on the host:
     // `zig build test`.
     const test_step = b.step("test", "Run the host tests");
-    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig", "src/font.zig", "src/colour.zig" }) |file| {
+    common.add_tests(b, test_step);
+    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig" }) |file| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(file),
             .target = b.graph.host,

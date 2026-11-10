@@ -307,7 +307,7 @@ pub fn recall(ctx: Context, sc: *const Scene) void {
     // Offline (-Ddemo), nothing re-reads the room: give it the scene's look directly.
     if (offline) if (groups.find(sc.group())) |g| switch (sc.look) {
         .lit => |l| {
-            const hs = @import("colour.zig").rgb_to_hue_sat(l.rgb);
+            const hs = @import("screen").colour.rgb_to_hue_sat(l.rgb);
             g.state = .{ .on = true, .bri = l.bri, .hue = hs.hue, .sat = hs.sat };
         },
         .dark => g.state.on = false,

@@ -28,8 +28,8 @@ const screen = switch (config.ui) {
     .list => @import("screen.zig"),
     .field => @import("field.zig"),
 };
-const ili9341 = @import("ili9341.zig");
-const ft6206 = @import("ft6206.zig");
+const ili9341 = @import("screen").lcd;
+const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 const lwip = net.lwip;
 
@@ -332,7 +332,7 @@ fn demo() noreturn {
     for (rooms) |r| catalog.add(&catalog.groups, .group, r[0], r[1], r[2]);
     catalog.add(&catalog.lights, .light, "2", "Hue color spot 1", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 });
     catalog.add(&catalog.lights, .light, "3", "Étoile", .{ .on = false, .bri = 120 });
-    const scenes = [_]struct { []const u8, []const u8, []const u8, @import("colour.zig").Rgb, u8 }{
+    const scenes = [_]struct { []const u8, []const u8, []const u8, @import("screen").Rgb, u8 }{
         .{ "s1", "Détente", "1", .{ .r = 255, .g = 160, .b = 80 }, 150 },
         .{ "s2", "Lecture", "1", .{ .r = 255, .g = 225, .b = 180 }, 254 },
         .{ "s3", "Horizon", "1", .{ .r = 255, .g = 110, .b = 60 }, 190 },

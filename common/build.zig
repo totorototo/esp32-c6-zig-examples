@@ -54,10 +54,18 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     return true;
 }
 
-/// Host tests of common's pure parts (HTTP framing, SNTP), for an example's `test` step.
+/// The touch screen (ILI9341 + FT6206), font, colours and text drawing, as a `screen` module.
+pub fn add_screen(b: *std.Build, fw: anytype) void {
+    const common = b.dependency("common", .{});
+    const screen = b.createModule(.{ .root_source_file = common.path("src/screen.zig") });
+    fw.add_app_import("screen", screen, .{ .depend_on_microzig = true });
+}
+
+/// Host tests of common's pure parts (HTTP framing, SNTP, UTF-8 font folding, colour
+/// conversions), for an example's `test` step.
 pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
     const common = b.dependency("common", .{});
-    for ([_][]const u8{ "src/https/http.zig", "src/https/sntp.zig" }) |file| {
+    for ([_][]const u8{ "src/https/http.zig", "src/https/sntp.zig", "src/screen/font.zig", "src/screen/colour.zig" }) |file| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = common.path(file),
             .target = b.graph.host,

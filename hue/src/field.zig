@@ -16,8 +16,8 @@ const config = @import("config");
 const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const ui = @import("ui.zig");
-const lcd = @import("ili9341.zig");
-const ft6206 = @import("ft6206.zig");
+const lcd = @import("screen").lcd;
+const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 const Point = ft6206.Point;
 

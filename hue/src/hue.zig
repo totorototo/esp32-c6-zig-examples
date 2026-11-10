@@ -4,7 +4,7 @@ const net = @import("net");
 const lwip = net.lwip;
 const mdns = @import("mdns.zig");
 const scenes = @import("scenes.zig");
-const colour = @import("colour.zig");
+const colour = @import("screen").colour;
 
 const log = std.log.scoped(.hue);
 

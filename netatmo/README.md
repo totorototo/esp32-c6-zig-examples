@@ -57,6 +57,27 @@ Expected log:
     [info]   module 09:00:00:dd:ee:ff NRV `Vanne chambre`, battery high
     [info] netatmo test: PASS
 
+## The screen
+
+With the 2.8" ILI9341 + FT6206 touch screen, wired as in `../hue`, and on by default
+(`-Dscreen=false` to go without), the board becomes a thermostat remote after the first
+read. One room at a time, the whole display painted by its temperature, cold blue through
+teal and amber to red:
+
+- the room's name, the measured temperature in large type, `SET 19.0°`, the mode
+  (`SCHEDULE`, `MANUAL`, `AWAY`, `FROST GUARD`...) and `HEATING` when its valves open;
+- **swipe** left or right: the next room (rooms without a thermostat or valve are left out);
+- **drag** up or down: the setpoint in 0.5 °C steps, shown inverted while you drag. Let go
+  and it is sent as a manual setpoint for 3 hours, the Netatmo app's default;
+- **tap** a room in manual mode: back to its schedule.
+
+Each action is one HTTPS request, so the setpoint line shows `SENDING` for about a second
+(about 9 s in Wokwi). The rooms are re-read every 2 minutes, and the access token is
+renewed before it expires (it lasts 3 hours).
+
+To look at the screen without credentials or a network: `-Ddemo=true` (made-up rooms and a
+scripted finger that swipes, drags and taps by itself).
+
 ## Memory
 
 Same budget as `tls`: the main stack is 160 KiB (`init_with_heap(160 * 1024)` reserves it;

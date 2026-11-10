@@ -4,7 +4,7 @@ const std = @import("std");
 const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const ui = @import("ui.zig");
-const ft6206 = @import("ft6206.zig");
+const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 
 const log = std.log.scoped(.screen);
