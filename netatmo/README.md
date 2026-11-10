@@ -80,6 +80,7 @@ scripted finger that swipes, drags and taps by itself).
 
 ## Memory
 
-Same budget as `tls`: the main stack is 160 KiB (`init_with_heap(160 * 1024)` reserves it;
-the heap gets the rest, about 76 KiB, for Wi-Fi and lwIP). The home's rooms and modules
-(at most 16 and 24) live in a static, not on the stack, which TLS already takes 130 KiB of.
+Same budget as `tls`: the main stack is 112 KiB (`init_with_heap(112 * 1024)` reserves it;
+the heap gets the rest, about 124 KiB, for Wi-Fi and lwIP, which use about 67 KiB). The
+home's rooms and modules (at most 16 and 24) live in a static, not on the stack, which a TLS
+handshake takes about 86 KiB of.

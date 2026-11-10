@@ -108,8 +108,8 @@ pub fn main() !void {
         status("CONNECTING", .{ .r = 120, .g = 170, .b = 255 });
     }
     // What the heap leaves for the main task's stack (not the heap's size): HTTPS needs
-    // 160 KiB, see ../common/src/https.zig.
-    var heap: microzig.Allocator = try .init_with_heap(160 * 1024);
+    // 112 KiB, see ../common/src/https.zig.
+    var heap: microzig.Allocator = try .init_with_heap(112 * 1024);
     settings.init();
 
     // Decided at runtime on purpose: a comptime `if` would make the rest dead code, and

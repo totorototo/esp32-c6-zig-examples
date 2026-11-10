@@ -41,12 +41,15 @@ The handshake takes about 9 s in Wokwi, whose CPU runs about 10x slower than the
 TLS is the most memory-hungry thing on this board, and three things had to be right:
 
 - **Stack.** `microzig.Allocator.init_with_heap(n)` reserves `n` bytes at the top of RAM for
-  the main stack; the heap gets the rest. Here `n` is 160 KiB: the handshake goes about
-  130 KiB deep. The heap keeps about 70 KiB, which Wi-Fi and lwIP need.
+  the main stack; the heap gets the rest. Here `n` is 112 KiB: the handshake goes about
+  86 KiB deep. The heap keeps about 132 KiB (Wi-Fi and lwIP use about 67 KiB).
 - **A patched copy of std's TLS client** (`../common/src/https/tls_client.zig`, from Zig 0.17.1, MIT, see
   `../NOTICE`). Each patch is marked `microzig patch`:
   - The handshake's 2×16 KiB cleartext buffers and the key share (ML-KEM-768, P-256, P-384 and
-    X25519 key pairs, 18 KiB) are statics instead of locals.
+    X25519 key pairs, 18 KiB) are statics instead of locals. The key share is filled in place
+    by a `noinline` `KeyShare.initInPlace`: returned by value, with the key generation inlined,
+    it made `init`'s frame 83 KiB (now 31 KiB).
+  - The handshake record decryption prongs of `init` run in `noinline` functions too.
   - `verifySignature` and `KeyShare.exchange` call each `inline` prong through a `noinline`
     function. Inlined, LLVM gave every scheme its own slots in one frame: 100 KiB and 45 KiB.
     A frame that size moves `sp` past the end of the stack in one step, without touching the
@@ -60,7 +63,8 @@ TLS is the most memory-hungry thing on this board, and three things had to be ri
   encrypted write spins forever.
 
 To see the stack frames: `riscv64-elf-objdump -d zig-out/firmware/tls.elf` and look for big
-`sub sp, sp, …` in prologues. `init` (83 KiB) and `exchangeHybrid` (44 KiB) are the largest
+`sub sp, sp, …` in prologues. `exchangeHybrid` (44 KiB), `initInPlace` (40 KiB, key
+generation, before the exchange) and `init` (31 KiB, 83 KiB before the in-place key share) are the largest
 left.
 
 ## Debugging in Wokwi with GDB

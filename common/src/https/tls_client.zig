@@ -5,6 +5,11 @@
 //!     the handshake needed about 180 KB of stack, which on the ESP32-C6 left too little
 //!     heap for Wi-Fi.
 //!   - Consequence: one handshake at a time (fine for a single-connection device).
+//!   - The key share is filled in place by a noinline `KeyShare.initInPlace`, instead of
+//!     `KeyShare.init` returning 18 KiB by value: with key generation inlined, that alone
+//!     made `init`'s frame 83 KiB; it is now 31 KiB.
+//!   - The handshake record decryption prongs of `init` are noinline functions too
+//!     (`decryptHandshakeRecord`, `decryptTls12HandshakeRecord`).
 //!   - `verifySignature` and `KeyShare.exchange` call each `inline` prong through its own
 //!     noinline function. Inlined, LLVM gave every scheme its own slots in one frame:
 //!     100 KiB and 45 KiB. A frame that big moves `sp` straight past the stack's end and
@@ -221,7 +226,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
     const legacy_session_id = options.entropy[32..64].*;
 
     // microzig patch: the key share lives in a static, not in this frame (see the header).
-    key_share_static = KeyShare.init(options.entropy[64..240]) catch |err| switch (err) {
+    @call(.never_inline, KeyShare.initInPlace, .{ &key_share_static, options.entropy[64..240] }) catch |err| switch (err) {
         // Only possible to happen if the seed is all zeroes.
         error.IdentityElement => return error.InsufficientEntropy,
     };
@@ -377,28 +382,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                 try record_decoder.ensure(record_len);
                 const cleartext_buf = &cleartext_bufs[cert_buf_index % 2];
                 switch (handshake_cipher) {
-                    inline else => |*p| {
-                        const pv = &p.version.tls_1_3;
-                        const P = @TypeOf(p.*).A;
-                        if (record_len < P.AEAD.tag_length) return error.TlsRecordOverflow;
-                        const ciphertext = record_decoder.slice(record_len - P.AEAD.tag_length);
-                        const cleartext_fragment_buf = cleartext_buf[cleartext_fragment_end..];
-                        if (ciphertext.len > cleartext_fragment_buf.len) return error.TlsRecordOverflow;
-                        const cleartext = cleartext_fragment_buf[0..ciphertext.len];
-                        const auth_tag = record_decoder.array(P.AEAD.tag_length).*;
-                        const nonce = nonce: {
-                            const V = @Vector(P.AEAD.nonce_length, u8);
-                            const pad: [P.AEAD.nonce_length - 8]u8 = @splat(0);
-                            const operand: V = pad ++ @as([8]u8, @bitCast(@byteSwap(read_seq)));
-                            break :nonce @as(V, pv.server_handshake_iv) ^ operand;
-                        };
-                        P.AEAD.decrypt(cleartext, ciphertext, auth_tag, &record_header, nonce, pv.server_handshake_key) catch
-                            return error.TlsBadRecordMac;
-                        // TODO use scalar, non-slice version
-                        const trimmed_len = mem.trimEnd(u8, cleartext, "\x00").len;
-                        if (trimmed_len == 0) return error.TlsDecodeError;
-                        cleartext_fragment_end += trimmed_len;
-                    },
+                    // microzig patch: noinline per cipher suite (see the header).
+                    inline else => |*p| try @call(.never_inline, decryptHandshakeRecord, .{
+                        p, record_len, &record_decoder, cleartext_buf, &cleartext_fragment_end, &record_header, read_seq,
+                    }),
                 }
                 read_seq += 1;
                 cleartext_fragment_end -= 1;
@@ -412,31 +399,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                 try record_decoder.ensure(record_len);
                 const cleartext_buf = &cleartext_bufs[cert_buf_index % 2];
                 switch (handshake_cipher) {
-                    inline else => |*p| {
-                        const pv = &p.version.tls_1_2;
-                        const P = @TypeOf(p.*).A;
-                        if (record_len < P.record_iv_length + P.mac_length) return error.TlsRecordOverflow;
-                        const message_len: u16 = record_len - P.record_iv_length - P.mac_length;
-                        const cleartext_fragment_buf = cleartext_buf[cleartext_fragment_end..];
-                        if (message_len > cleartext_fragment_buf.len) return error.TlsRecordOverflow;
-                        const cleartext = cleartext_fragment_buf[0..message_len];
-                        const ad = mem.toBytes(big(read_seq)) ++
-                            record_header[0 .. 1 + 2] ++
-                            mem.toBytes(big(message_len));
-                        const record_iv = record_decoder.array(P.record_iv_length).*;
-                        const masked_read_seq = read_seq &
-                            comptime std.math.shl(u64, std.math.maxInt(u64), 8 * P.record_iv_length);
-                        const nonce: [P.AEAD.nonce_length]u8 = nonce: {
-                            const V = @Vector(P.AEAD.nonce_length, u8);
-                            const pad: [P.AEAD.nonce_length - 8]u8 = @splat(0);
-                            const operand: V = pad ++ @as([8]u8, @bitCast(@byteSwap(masked_read_seq)));
-                            break :nonce @as(V, pv.app_cipher.server_write_IV ++ record_iv) ^ operand;
-                        };
-                        const ciphertext = record_decoder.slice(message_len);
-                        const auth_tag = record_decoder.array(P.mac_length);
-                        P.AEAD.decrypt(cleartext, ciphertext, auth_tag.*, ad, nonce, pv.app_cipher.server_write_key) catch return error.TlsBadRecordMac;
-                        cleartext_fragment_end += message_len;
-                    },
+                    // microzig patch: noinline per cipher suite (see the header).
+                    inline else => |*p| try @call(.never_inline, decryptTls12HandshakeRecord, .{
+                        p, record_len, &record_decoder, cleartext_buf, &cleartext_fragment_end, &record_header, read_seq,
+                    }),
                 }
                 read_seq += 1;
                 break :content .{ tls.Decoder.fromTheirSlice(cleartext_buf[cleartext_fragment_start..cleartext_fragment_end]), record_ct };
@@ -1383,6 +1349,16 @@ const KeyShare = struct {
         crypto.dh.X25519.shared_length,
     );
 
+    /// microzig patch: fills `ks` field by field, in its own frame, instead of returning an
+    /// 18 KiB KeyShare by value into init's frame.
+    fn initInPlace(ks: *KeyShare, seed: *const [176]u8) error{IdentityElement}!void {
+        ks.ml_kem768_kp = try .generateDeterministic(seed[0..64].*);
+        ks.secp256r1_kp = try .generateDeterministic(seed[64..96].*);
+        ks.secp384r1_kp = try .generateDeterministic(seed[96..144].*);
+        ks.x25519_kp = .generateDeterministic(seed[144..176].*);
+        ks.sk_len = 0;
+    }
+
     fn init(seed: *const [176]u8) error{IdentityElement}!KeyShare {
         return .{
             .ml_kem768_kp = try .generateDeterministic(seed[0..64].*),
@@ -1821,6 +1797,74 @@ test "zero-length key_update body" {
             .client_iv = undefined,
         } } },
     ));
+}
+
+// microzig patch: the bodies of init's per-cipher-suite prongs, as functions, so init's frame
+// doesn't hold every suite's AEAD state at once (see the header).
+
+fn decryptHandshakeRecord(
+    p: anytype,
+    record_len: u16,
+    record_decoder: *tls.Decoder,
+    cleartext_buf: []u8,
+    cleartext_fragment_end: *usize,
+    record_header: *const [tls.record_header_len]u8,
+    read_seq: u64,
+) !void {
+    const pv = &p.version.tls_1_3;
+    const P = @TypeOf(p.*).A;
+    if (record_len < P.AEAD.tag_length) return error.TlsRecordOverflow;
+    const ciphertext = record_decoder.slice(record_len - P.AEAD.tag_length);
+    const cleartext_fragment_buf = cleartext_buf[cleartext_fragment_end.*..];
+    if (ciphertext.len > cleartext_fragment_buf.len) return error.TlsRecordOverflow;
+    const cleartext = cleartext_fragment_buf[0..ciphertext.len];
+    const auth_tag = record_decoder.array(P.AEAD.tag_length).*;
+    const nonce = nonce: {
+        const V = @Vector(P.AEAD.nonce_length, u8);
+        const pad: [P.AEAD.nonce_length - 8]u8 = @splat(0);
+        const operand: V = pad ++ @as([8]u8, @bitCast(@byteSwap(read_seq)));
+        break :nonce @as(V, pv.server_handshake_iv) ^ operand;
+    };
+    P.AEAD.decrypt(cleartext, ciphertext, auth_tag, record_header, nonce, pv.server_handshake_key) catch
+        return error.TlsBadRecordMac;
+    // TODO use scalar, non-slice version
+    const trimmed_len = mem.trimEnd(u8, cleartext, "\x00").len;
+    if (trimmed_len == 0) return error.TlsDecodeError;
+    cleartext_fragment_end.* += trimmed_len;
+}
+
+fn decryptTls12HandshakeRecord(
+    p: anytype,
+    record_len: u16,
+    record_decoder: *tls.Decoder,
+    cleartext_buf: []u8,
+    cleartext_fragment_end: *usize,
+    record_header: *const [tls.record_header_len]u8,
+    read_seq: u64,
+) !void {
+    const pv = &p.version.tls_1_2;
+    const P = @TypeOf(p.*).A;
+    if (record_len < P.record_iv_length + P.mac_length) return error.TlsRecordOverflow;
+    const message_len: u16 = record_len - P.record_iv_length - P.mac_length;
+    const cleartext_fragment_buf = cleartext_buf[cleartext_fragment_end.*..];
+    if (message_len > cleartext_fragment_buf.len) return error.TlsRecordOverflow;
+    const cleartext = cleartext_fragment_buf[0..message_len];
+    const ad = mem.toBytes(big(read_seq)) ++
+        record_header[0 .. 1 + 2] ++
+        mem.toBytes(big(message_len));
+    const record_iv = record_decoder.array(P.record_iv_length).*;
+    const masked_read_seq = read_seq &
+        comptime std.math.shl(u64, std.math.maxInt(u64), 8 * P.record_iv_length);
+    const nonce: [P.AEAD.nonce_length]u8 = nonce: {
+        const V = @Vector(P.AEAD.nonce_length, u8);
+        const pad: [P.AEAD.nonce_length - 8]u8 = @splat(0);
+        const operand: V = pad ++ @as([8]u8, @bitCast(@byteSwap(masked_read_seq)));
+        break :nonce @as(V, pv.app_cipher.server_write_IV ++ record_iv) ^ operand;
+    };
+    const ciphertext = record_decoder.slice(message_len);
+    const auth_tag = record_decoder.array(P.mac_length);
+    P.AEAD.decrypt(cleartext, ciphertext, auth_tag.*, ad, nonce, pv.app_cipher.server_write_key) catch return error.TlsBadRecordMac;
+    cleartext_fragment_end.* += message_len;
 }
 
 // microzig patch: handshake state kept out of `init`'s stack frame.

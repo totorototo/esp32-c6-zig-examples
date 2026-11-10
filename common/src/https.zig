@@ -3,9 +3,10 @@
 //! small responses, `open` to stream a big one.
 //!
 //! Requirements on the firmware:
-//!   - A main stack of at least 160 KiB: `microzig.Allocator.init_with_heap(160 * 1024)`.
+//!   - A main stack of at least 112 KiB: `microzig.Allocator.init_with_heap(112 * 1024)`.
 //!     (The argument is what the heap leaves for the stack, not the heap's size.)
-//!     The handshake goes about 130 KiB deep.
+//!     The handshake goes about 86 KiB deep: `tls_client.init` (31 KiB) and, during the key
+//!     exchange, `KeyShare.exchangeHybrid` (44 KiB) plus ML-KEM's own frames.
 //!   - `std_options.page_size_min/max` set (any value): the certificate bundle's lock wants an
 //!     `std.Io`, and `std.Io.failing` references file memory maps.
 //!   - `sync_time()` once Wi-Fi is up: certificate dates need the wall-clock time.

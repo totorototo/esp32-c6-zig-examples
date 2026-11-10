@@ -85,8 +85,8 @@ var response: [4096]u8 = undefined;
 pub fn main() !void {
     std.log.info("tls on ESP32-C6, cpu clock {} MHz", .{hal.clock_config.cpu_clk_freq / 1_000_000});
     // What the heap leaves for the main task's stack (not the heap's size): HTTPS needs
-    // 160 KiB, see ../common/src/https.zig.
-    var heap: microzig.Allocator = try .init_with_heap(160 * 1024);
+    // 112 KiB, see ../common/src/https.zig.
+    var heap: microzig.Allocator = try .init_with_heap(112 * 1024);
     try net.up(heap.allocator());
 
     run() catch |err| {
