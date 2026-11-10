@@ -33,6 +33,9 @@ jobs:
           - sample: boot
             timeout: 20000
             expect: "boot test: PASS"
+          - sample: netatmo
+            # Needs a Netatmo account's credentials: build and host tests only.
+            expect: ""
           - sample: nvs
             timeout: 60000
             expect: "nvs test: PASS"

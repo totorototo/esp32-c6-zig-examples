@@ -9,7 +9,7 @@ Zig's own TLS client, no C library:
    clock.
 3. Opens TLS 1.3 to `api.netatmo.com:443` (X25519 + ML-KEM-768 key exchange, AES-256-GCM,
    RSA-PSS), verifying the host name and the chain up to one pinned root: DigiCert Global
-   Root G2 (`src/digicert_global_root_g2.der`, SHA-256 `CB3CCBB7…5AB1CB5F`, valid to 2038).
+   Root G2 (`../common/src/https/digicert_global_root_g2.der`, SHA-256 `CB3CCBB7…5AB1CB5F`, valid to 2038).
    Pinning the root, not the leaf: Netatmo's leaf is reissued every six months.
 4. Sends `GET /api/homesdata` without a token. Netatmo answers
    `400 Missing token argument` with `{"error":{"code":1,...}}`: that proves the request went
@@ -20,7 +20,10 @@ Logs go to UART0 (115200 baud) and end with `tls test: PASS` or `tls test: FAIL`
 ## Build and run
 
     zig build -Doptimize=ReleaseSmall
-    zig build test                      # host tests (SNTP)
+    zig build test                      # host tests (SNTP, HTTP framing)
+
+The HTTPS stack lives in `../common/src/https.zig` (shared with `netatmo`); this sample is
+its smallest user.
 
 Wokwi: open `diagram.json` (needs internet; the CLI's cloud runs work too). Expected log:
 
@@ -40,7 +43,7 @@ TLS is the most memory-hungry thing on this board, and three things had to be ri
 - **Stack.** `microzig.Allocator.init_with_heap(n)` reserves `n` bytes at the top of RAM for
   the main stack; the heap gets the rest. Here `n` is 160 KiB: the handshake goes about
   130 KiB deep. The heap keeps about 70 KiB, which Wi-Fi and lwIP need.
-- **A patched copy of std's TLS client** (`src/tls_client.zig`, from Zig 0.17.1, MIT, see
+- **A patched copy of std's TLS client** (`../common/src/https/tls_client.zig`, from Zig 0.17.1, MIT, see
   `../NOTICE`). Each patch is marked `microzig patch`:
   - The handshake's 2×16 KiB cleartext buffers and the key share (ML-KEM-768, P-256, P-384 and
     X25519 key pairs, 18 KiB) are statics instead of locals.

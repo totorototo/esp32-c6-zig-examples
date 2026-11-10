@@ -45,5 +45,23 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     net.addImport("lwip", lwip);
     net.addImport("config", opts.config);
     fw.add_app_import("net", net, .{ .depend_on_microzig = true });
+
+    // HTTPS on top of it (TLS 1.3, see src/https.zig for what the firmware must provide).
+    // Only compiled into firmware that imports it.
+    const https = b.createModule(.{ .root_source_file = common.path("src/https.zig") });
+    https.addImport("net", net);
+    fw.add_app_import("https", https, .{ .depend_on_microzig = true });
     return true;
+}
+
+/// Host tests of common's pure parts (HTTP framing, SNTP), for an example's `test` step.
+pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
+    const common = b.dependency("common", .{});
+    for ([_][]const u8{ "src/https/http.zig", "src/https/sntp.zig" }) |file| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = common.path(file),
+            .target = b.graph.host,
+        }) });
+        step.dependOn(&b.addRunArtifact(t).step);
+    }
 }

@@ -27,16 +27,12 @@ pub fn build(b: *std.Build) void {
     const config = options.createModule();
     fw.exe.root_module.addImport("config", config);
 
-    // Wi-Fi, lwIP and the HTTP helpers, shared with the other Wi-Fi example (../common).
+    // Wi-Fi, lwIP and HTTPS, shared with the other Wi-Fi examples (../common).
     if (!common.add_net(b, mz_dep, fw, .{ .optimize = optimize, .config = config })) return;
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
 
-    const test_step = b.step("test", "Run the host tests");
-    const t = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/sntp.zig"),
-        .target = b.graph.host,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(t).step);
+    // Host tests of the HTTPS stack's pure parts (in ../common).
+    common.add_tests(b, b.step("test", "Run the host tests"));
 }

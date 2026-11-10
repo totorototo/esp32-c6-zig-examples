@@ -1,0 +1,5 @@
+[wokwi]
+version = 1
+# Build first (see README): zig build -Doptimize=ReleaseSmall -Dnetatmo_client_id=...
+firmware = "zig-out/firmware/netatmo.elf"
+elf = "zig-out/firmware/netatmo.elf"
