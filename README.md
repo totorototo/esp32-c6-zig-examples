@@ -12,7 +12,7 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 | [`rmt`](rmt)             | WS2812 LEDs through RMT: the on-board LED and a 16 LED ring, with a self-check    |
 | [`weblight`](weblight)   | Wi-Fi + lwIP: a web page that sets the RGB LED's colour                           |
 | [`hue`](hue)             | A Philips Hue remote: bridge pairing, local API, web remote, ILI9341 touch screen |
-| [`wifinvs`](wifinvs)     | Wi-Fi driver config kept in NVS: saved by one boot, read back by the next         |
+| [`wifinvs`](wifinvs)     | Wi-Fi config and PHY calibration kept in NVS: saved by one boot, reused by the next |
 
 Each directory is its own Zig package: `cd` into it and follow its README.
 

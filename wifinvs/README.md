@@ -4,7 +4,10 @@ Test sample for the Wi-Fi driver's NVS callbacks: with `wifi.init(gpa, .{ .nvs =
 the driver keeps its configuration in the `nvs` partition (namespace `nvs.net80211`), like
 ESP-IDF with `nvs_enable`. The first boot applies a station config and joins `Wokwi-GUEST`,
 then resets the CPU; the second boot reads the station SSID back from the driver right after
-`wifi.init`, before applying anything. Logs go to UART0 (115200 baud). No wiring.
+`wifi.init`, before applying anything, and joins again from it. The PHY's RF calibration data
+is kept the same way (namespace `phy`): boot 1 calibrates fully and saves it, boot 2 does a
+partial calibration from it (`radio.phy_calibration()`). Logs go to UART0 (115200 baud). No
+wiring.
 
 Fetches MicroZig from the `esp32-c6` branch of
 [totorototo/microzig](https://github.com/totorototo/microzig), pinned in `build.zig.zon` (see the
@@ -26,15 +29,23 @@ Expected log:
 
     [info] boot 1
     [info] station ssid after init: ``
+    [info] phy calibration: full, saved to nvs
     [info] connected to `Wokwi-GUEST`
     [info] first boot: config saved, resetting
     ...
     [info] boot 2
     [info] station ssid after init: `Wokwi-GUEST`
+    [info] phy calibration: partial
+    [info] connected again, from the saved config
     [info] wifinvs test: PASS
 
 On hardware the joined network has to be `Wokwi-GUEST` for boot 1 to finish, so this is a
-simulator test. In your own firmware the same option means a saved network survives reboots.
+simulator test. In your own firmware the same option means a saved network survives reboots
+and the RF is calibrated fully only once. Note that `wifi.init` resets the mode: call
+`wifi.set_mode` (or `wifi.apply`) before `wifi.start`.
+
+Wokwi runs the PHY blob, so this checks the save/load path and that the blob accepts its own
+data; whether partial calibration gives good RF on a real board needs hardware.
 
 ## Sharing the store
 

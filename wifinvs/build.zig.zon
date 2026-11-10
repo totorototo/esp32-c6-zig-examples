@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .microzig = .{
-            .url = "git+https://github.com/totorototo/microzig#a6d6aa47a2f9aa8e260225e0d9279515401a237a",
-            .hash = "microzig-0.17.33-D20YSb99lAGbPY3il9xyHuVHhICQfVodiMXDzQU2nXoE",
+            .url = "git+https://github.com/totorototo/microzig#6fbdf08ccc71d077673d7a096aa53a30d93ebad5",
+            .hash = "microzig-0.17.33-D20YScCRlAH49aNkk_1j7P_2o79kr9r7RUtIJpHpM-6b",
         },
     },
     .paths = .{

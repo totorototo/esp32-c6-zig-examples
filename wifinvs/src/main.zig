@@ -67,6 +67,27 @@ const ssid = "Wokwi-GUEST";
 // A global: the store holds a 4 KiB page buffer.
 var store: flash.Nvs = undefined;
 
+var failures: u32 = 0;
+
+fn expect(ok: bool, comptime what: []const u8) void {
+    if (ok) return;
+    failures += 1;
+    std.log.err("check failed: " ++ what, .{});
+}
+
+fn log_calibration() ?radio.PhyCalibration {
+    const cal = radio.phy_calibration() orelse {
+        std.log.err("the PHY was not enabled", .{});
+        return null;
+    };
+    std.log.info("phy calibration: {t}{s}{s}", .{
+        cal.mode,
+        if (cal.data_check_failed) ", saved data rejected" else "",
+        if (cal.saved) ", saved to nvs" else "",
+    });
+    return cal;
+}
+
 pub fn main() !void {
     std.log.info("wifinvs on ESP32-C6", .{});
 
@@ -98,6 +119,8 @@ pub fn main() !void {
         try wifi.apply(.{ .sta = .{ .ssid = ssid, .auth_method = .none } });
         try wifi.start();
         while (!wifi.get_sta_state().is_started()) rtos.sleep(.from_ms(100));
+        const cal = log_calibration();
+        expect(cal != null and cal.?.mode == .full and cal.?.saved, "boot 1 calibrates fully and saves");
         try wifi.connect();
         while (wifi.get_sta_state() != .connected) rtos.sleep(.from_ms(100));
         std.log.info("connected to `{s}`", .{ssid});
@@ -107,9 +130,18 @@ pub fn main() !void {
             defer wifi.unlock_nvs();
             _ = store.open("nvs.net80211", .read_only) catch |err| {
                 std.log.err("the driver wrote no namespace: {t}", .{err});
-                std.log.err("wifinvs test: FAIL", .{});
-                return;
+                failures += 1;
             };
+            const phy_ns = store.open("phy", .read_only) catch |err| blk: {
+                std.log.err("no phy namespace: {t}", .{err});
+                failures += 1;
+                break :blk null;
+            };
+            if (phy_ns) |h| expect((h.blob_len("cal_data") catch 0) > 0, "the calibration data is saved");
+        }
+        if (failures > 0) {
+            std.log.err("wifinvs test: FAIL ({} checks failed)", .{failures});
+            return;
         }
         std.log.info("first boot: config saved, resetting", .{});
         rtos.sleep(.from_ms(50)); // let the UART drain
@@ -117,10 +149,23 @@ pub fn main() !void {
         hal.rom.software_reset_cpu();
     }
 
-    if (std.mem.eql(u8, saved, ssid)) {
+    expect(std.mem.eql(u8, saved, ssid), "the station ssid survived the reset");
+
+    // The PHY is enabled by `start`: now it must reuse the data the first boot saved.
+    // `wifi.init` resets the mode, so set it again; the saved station config stays.
+    try wifi.set_mode(.sta);
+    try wifi.start();
+    while (!wifi.get_sta_state().is_started()) rtos.sleep(.from_ms(100));
+    const cal = log_calibration();
+    expect(cal != null and cal.?.mode == .partial and !cal.?.data_check_failed, "boot 2 reuses the calibration data");
+    try wifi.connect();
+    while (wifi.get_sta_state() != .connected) rtos.sleep(.from_ms(100));
+    std.log.info("connected again, from the saved config", .{});
+
+    if (failures == 0) {
         std.log.info("wifinvs test: PASS", .{});
     } else {
-        std.log.err("wifinvs test: FAIL (expected `{s}`)", .{ssid});
+        std.log.err("wifinvs test: FAIL ({} checks failed)", .{failures});
     }
     while (true) rtos.sleep(.from_ms(1000));
 }
