@@ -1,0 +1,5 @@
+[wokwi]
+version = 1
+# Build first: zig build -Doptimize=ReleaseSmall
+firmware = "zig-out/firmware/wifinvs.elf"
+elf = "zig-out/firmware/wifinvs.elf"
