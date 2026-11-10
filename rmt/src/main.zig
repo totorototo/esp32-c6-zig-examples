@@ -44,6 +44,9 @@ fn uart_log(
 const led_pin = gpio.num(8);
 const ring_pin = gpio.num(10);
 const ring_len = 16;
+/// Per-channel LED level. Wokwi draws the colour as plain RGB, so a level that is bright on a
+/// real WS2812 (16 is plenty) looks black in the simulator. Lower it on hardware.
+const brightness = 255;
 
 // 40 MHz crystal, undivided: 25 ns ticks, whatever the CPU clock is.
 const rmt_config: rmt.Config = .{ .clock_config = hal.clock_config };
@@ -72,12 +75,12 @@ pub fn main() !void {
     ring = .init(rmt.instance.TX1, tick_freq, .{});
 
     // 1. One LED: no streaming.
-    check("TX0, 1 LED", &led, &.{.{ .r = 16, .g = 0, .b = 0 }});
+    check("TX0, 1 LED", &led, &.{.{ .r = brightness, .g = 0, .b = 0 }});
 
     // 2. Two LEDs fill the memory exactly, so the end marker is the first streamed code.
     var colors: [ring_len]Color = @splat(.{ .r = 0, .g = 0, .b = 0 });
-    colors[0] = .{ .r = 0, .g = 16, .b = 0 };
-    colors[1] = .{ .r = 0, .g = 0, .b = 16 };
+    colors[0] = .{ .r = 0, .g = brightness, .b = 0 };
+    colors[1] = .{ .r = 0, .g = 0, .b = brightness };
     check("TX1, 2 LEDs", &ring, colors[0..2]);
 
     // 3. The whole ring: 8 refills of half the memory.
@@ -136,9 +139,9 @@ fn check(name: []const u8, dev: *WS2812, colors: []const Color) void {
     }
 }
 
-/// A dim colour wheel: 0 = red, 85 = green, 170 = blue.
+/// A colour wheel: 0 = red, 85 = green, 170 = blue.
 fn wheel(pos: u8) Color {
-    const level = 16;
+    const level = brightness;
     const third: u8 = pos / 85;
     const x: u8 = @intCast(@as(u16, pos % 85) * level / 85);
     return switch (third) {
