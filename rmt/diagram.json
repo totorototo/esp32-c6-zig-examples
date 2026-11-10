@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "author": "totorototo",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-c6-devkitc-1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-led-ring", "id": "ring", "top": -180, "left": 140, "attrs": { "pixels": "16" } },
+    { "type": "wokwi-logic-analyzer", "id": "logic", "top": 40, "left": 260, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "ring:DIN", "esp:10", "green", [] ],
+    [ "ring:VCC", "esp:5V", "red", [] ],
+    [ "ring:GND", "esp:GND.1", "black", [] ],
+    [ "logic:D0", "esp:10", "green", [] ],
+    [ "logic:D1", "esp:8", "blue", [] ]
+  ],
+  "dependencies": {}
+}

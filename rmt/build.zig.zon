@@ -1,0 +1,17 @@
+.{
+    .name = .rmt,
+    .fingerprint = 0x2f0fc5e3b2d10416,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .microzig = .{
+            .url = "git+https://github.com/totorototo/microzig#1d77431e5415c7a8b09154db05ce2aabed23caa8",
+            .hash = "microzig-0.17.33-D20YSTB0kwHr58H1aUVYbFtZHFqCQa1ohbKGQQaRotlY",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
