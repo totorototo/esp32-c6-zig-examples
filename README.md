@@ -7,6 +7,7 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 | Example                  | What it shows                                                                    |
 |--------------------------|----------------------------------------------------------------------------------|
 | [`blinky`](blinky)       | The on-board WS2812 RGB LED through SPI2, logs over USB-Serial-JTAG               |
+| [`nvs`](nvs)             | Settings that survive a reset: flash driver and ESP-IDF's NVS format, self-check   |
 | [`oled`](oled)           | An SSD1306 128x64 display over I2C, with a 5x7 font                               |
 | [`rmt`](rmt)             | WS2812 LEDs through RMT: the on-board LED and a 16 LED ring, with a self-check    |
 | [`weblight`](weblight)   | Wi-Fi + lwIP: a web page that sets the RGB LED's colour                           |
@@ -62,7 +63,7 @@ includes the whole tree and exposes `modules/lwip` and `modules/foundation-libc`
 
 To move every example to a newer commit of the fork:
 
-    for d in blinky oled rmt weblight hue; do
+    for d in blinky nvs oled rmt weblight hue; do
         (cd $d && zig fetch --save=microzig "git+https://github.com/totorototo/microzig#<commit>")
     done
 

@@ -1,0 +1,17 @@
+.{
+    .name = .nvs,
+    .fingerprint = 0xd61c1cee98c1a32,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .microzig = .{
+            .url = "git+https://github.com/totorototo/microzig#f64390f20e10d54016c93d3dcd846e7dfd894393",
+            .hash = "microzig-0.17.33-D20YScNjlAGT9OOvPReMiw-LHSQ-nK1ykNMSu9fYi2Wb",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
