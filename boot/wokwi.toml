@@ -1,0 +1,5 @@
+[wokwi]
+version = 1
+# Only the image variant runs in Wokwi (see README).
+firmware = "zig-out/firmware/boot_image.elf"
+elf = "zig-out/firmware/boot_image.elf"
