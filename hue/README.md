@@ -46,6 +46,24 @@ until you rebuild.
 **Starting over:** hold the BOOT button for 3 s (or `curl -X POST http://<board>/forget`).
 The board forgets the bridge, the username and the selection, and restarts.
 
+## Experimental: the field UI (`-Dui=field`)
+
+No buttons and no lists: the screen *is* the light. One room fills the whole display in
+its own colour, at its own brightness, with its name and level in large type.
+
+- **Swipe** left or right: next or previous room, with a colour wipe. Dots show where you are.
+- **Drag** up or down: brightness. The screen dims with you, and the bridge follows.
+- **Tap:** on or off.
+- **Press and hold:** the screen turns into a colour field (hue across, saturation down,
+  white at the bottom). Slide to a colour and let go to set it.
+
+It browses rooms (lights only when the bridge has no rooms). The web remote and the LED
+follow the room on screen. `-Ddemo=true` runs either UI on made-up rooms without Wi-Fi
+or a bridge, and in the field UI a scripted finger plays every gesture once, so it can be
+watched (and screenshotted) in Wokwi:
+
+    zig build -Doptimize=ReleaseSmall -Dui=field -Ddemo=true -Dled_level=255
+
 ## What is saved
 
 In the flash's `nvs` partition, namespace `hue`, in ESP-IDF's NVS format (`src/settings.zig`):

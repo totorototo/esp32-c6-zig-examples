@@ -53,6 +53,9 @@ pub const List = struct {
 };
 
 pub var lights: List = .{};
+
+/// No bridge: changes only update the local copies, reads keep what's there (-Ddemo).
+pub var offline = false;
 pub var groups: List = .{};
 
 pub fn list(kind: hue.Kind) *List {
@@ -99,6 +102,7 @@ pub const Context = struct {
 /// Replaces `kind`'s list with what the bridge has now. Rooms and zones only: the other
 /// group types (LightGroup, Entertainment, Luminaire) are app or bridge internals.
 pub fn refresh(ctx: Context, kind: hue.Kind) !void {
+    if (offline) return;
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     const l = list(kind);
@@ -126,7 +130,7 @@ pub fn refresh(ctx: Context, kind: hue.Kind) !void {
 
 var scratch: List = .{};
 
-fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.LightState) void {
+pub fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.LightState) void {
     if (l.len == max_entries or id.len > 8) {
         log.warn("skipping {t} {s} `{s}`: list full or id too long", .{ kind, id, n });
         return;
@@ -140,6 +144,7 @@ fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.Light
 
 /// Re-reads one entry, e.g. the one on the settings page.
 pub fn refresh_entry(ctx: Context, e: *Entry) !void {
+    if (offline) return;
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     const fresh = try hue.get(arena.allocator(), ctx.bridge, ctx.user, e.target());
@@ -151,7 +156,7 @@ pub fn refresh_entry(ctx: Context, e: *Entry) !void {
 pub fn apply(ctx: Context, e: *Entry, change: hue.Change) void {
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
-    hue.set_state(arena.allocator(), ctx.bridge, ctx.user, e.target(), change) catch |err| {
+    if (!offline) hue.set_state(arena.allocator(), ctx.bridge, ctx.user, e.target(), change) catch |err| {
         log.err("set {t} {s} failed: {t}", .{ e.kind, e.id(), err });
         return;
     };
@@ -247,6 +252,7 @@ pub fn is_recalled(sc: *const Scene) bool {
 /// Replaces the scene list, sorted by room, then name. Room names come from `groups`, so
 /// refresh those first.
 pub fn refresh_scenes(ctx: Context) !void {
+    if (offline) return;
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     const fresh = &scene_scratch;

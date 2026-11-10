@@ -22,7 +22,12 @@ const hue = @import("hue.zig");
 const web = net.web;
 const ui = @import("ui.zig");
 const catalog = @import("catalog.zig");
-const screen = @import("screen.zig");
+/// The touch UI: lists and a settings page (`-Dui=list`), or the gesture-only experiment
+/// (`-Dui=field`). Both have the same interface.
+const screen = switch (config.ui) {
+    .list => @import("screen.zig"),
+    .field => @import("field.zig"),
+};
 const ili9341 = @import("ili9341.zig");
 const ft6206 = @import("ft6206.zig");
 const settings = @import("settings.zig");
@@ -128,6 +133,11 @@ pub fn main() !void {
     status(.busy, "CONNECTING");
 
     heap = try .init_with_heap(16384);
+    // Decided at runtime on purpose: with a comptime `if`, the rest of main would be dead
+    // code, and lwIP's allocator (set up through net.up) would be dropped at link time.
+    var demo_mode = config.demo;
+    _ = &demo_mode;
+    if (demo_mode) demo();
     try net.up(heap.allocator());
 
     const bridge = try find_bridge();
@@ -303,6 +313,37 @@ fn restart() noreturn {
     rtos.sleep(.from_ms(500)); // let the log and the screen catch up
     // A CPU reset reboots through the ROM like a system reset, and also works in Wokwi.
     hal.rom.software_reset_cpu();
+}
+
+// ---- demo: no Wi-Fi, no bridge, made-up rooms (-Ddemo=true) ----
+
+/// Runs the touch UI on made-up rooms, for looking at it in a simulator. The field UI also
+/// plays its gestures by itself, so it can be watched without a hand.
+fn demo() noreturn {
+    std.log.info("demo: made-up rooms, no bridge", .{});
+    catalog.offline = true;
+    const rooms = [_]struct { []const u8, []const u8, hue.LightState }{
+        .{ "1", "Salon", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 } },
+        .{ "3", "Bureau", .{ .on = true, .bri = 110, .hue = 46000, .sat = 200 } },
+        .{ "5", "Chambre Aloïse", .{ .on = false, .bri = 90, .hue = 56000, .sat = 230 } },
+        .{ "2", "Salle à manger", .{ .on = true, .bri = 254 } },
+        .{ "83", "Séjour", .{ .on = true, .bri = 40, .hue = 1000, .sat = 254 } },
+    };
+    for (rooms) |r| catalog.add(&catalog.groups, .group, r[0], r[1], r[2]);
+    catalog.add(&catalog.lights, .light, "2", "Hue color spot 1", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 });
+    catalog.add(&catalog.lights, .light, "3", "Étoile", .{ .on = false, .bri = 120 });
+    catalog.select(&catalog.groups.items[0]);
+
+    const ctx: catalog.Context = .{ .bridge = hue.Bridge.from_octets(.{ 0, 0, 0, 0 }), .user = "", .allocator = heap.allocator() };
+    var mirrored: ?hue.LightState = null;
+    while (true) {
+        if (config.screen) screen.tick(ctx, now_ms());
+        if (catalog.selected()) |e| {
+            if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
+            mirrored = e.state;
+        }
+        rtos.sleep(.from_ms(poll_ms));
+    }
 }
 
 // ---- control: touch screen + web remote + periodic refresh, in one loop ----

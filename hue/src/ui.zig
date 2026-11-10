@@ -21,7 +21,7 @@ const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const Point = @import("ft6206.zig").Point;
 
-const Rect = struct {
+pub const Rect = struct {
     x: u16,
     y: u16,
     w: u16,
@@ -421,14 +421,14 @@ fn label_row(r: Rect, s: []const u8) void {
 const cell_w = font.width + 1;
 const cell_h = font.height + 1;
 
-fn text_width(s: []const u8, scale: u16) u16 {
+pub fn text_width(s: []const u8, scale: u16) u16 {
     var n: u16 = 0;
     var it: font.Chars = .{ .s = s };
     while (it.next()) |_| n += 1;
     return if (n == 0) 0 else n * cell_w * scale - scale;
 }
 
-fn text_centered(r: Rect, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Color) void {
+pub fn text_centered(r: Rect, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Color) void {
     const w = @min(text_width(s, scale), r.w);
     const h = font.height * scale;
     text(r.x + (r.w - w) / 2, r.y + (r.h -| h) / 2, s, scale, fg, back);
@@ -436,7 +436,7 @@ fn text_centered(r: Rect, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Co
 
 /// Draws UTF-8 `s` at (x, y), clipped at the right edge. Lowercase renders as uppercase,
 /// accented letters as their base letter, other non-ASCII characters as a box.
-fn text(x: u16, y: u16, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Color) void {
+pub fn text(x: u16, y: u16, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Color) void {
     var cx = x;
     var it: font.Chars = .{ .s = s };
     while (it.next()) |c| {
@@ -447,8 +447,8 @@ fn text(x: u16, y: u16, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Colo
 }
 
 fn glyph(x: u16, y: u16, g: font.Glyph, scale: u16, fg: lcd.Color, back: lcd.Color) void {
-    var row: [cell_w * 4 * 2]u8 = undefined; // up to scale 4
-    std.debug.assert(scale <= 4);
+    var row: [cell_w * 8 * 2]u8 = undefined; // up to scale 8
+    std.debug.assert(scale <= 8);
     const w = cell_w * scale;
     const h = cell_h * scale;
     lcd.begin(x, y, w, h);
@@ -466,7 +466,7 @@ fn glyph(x: u16, y: u16, g: font.Glyph, scale: u16, fg: lcd.Color, back: lcd.Col
 
 // ---- colour ----
 
-fn to565(c: Rgb) lcd.Color {
+pub fn to565(c: Rgb) lcd.Color {
     return lcd.rgb(c.r, c.g, c.b);
 }
 
