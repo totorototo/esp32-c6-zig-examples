@@ -14,10 +14,14 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "ssid", b.option([]const u8, "ssid", "Wi-Fi SSID") orelse "Wokwi-GUEST");
     options.addOption([]const u8, "password", b.option([]const u8, "password", "Wi-Fi password (empty: open network)") orelse "");
-    // Hue bridge settings. The username is a bridge credential: pass it on the command line only.
-    options.addOption([]const u8, "hue_ip", b.option([]const u8, "hue_ip", "Hue bridge IPv4 address") orelse "192.168.1.125");
-    options.addOption([]const u8, "hue_user", b.option([]const u8, "hue_user", "Hue API username (empty: pairing mode)") orelse "");
-    // Touch screen (ILI9341 + FT6206). It takes SPI2 from the on-board LED.
+    // Hue bridge settings. Both are optional: without them the board finds the bridge over
+    // mDNS, pairs, and saves both in flash. Given, they win over what is saved.
+    options.addOption([]const u8, "hue_ip", b.option([]const u8, "hue_ip", "Hue bridge IPv4 address (default: saved, else mDNS search)") orelse "");
+    options.addOption([]const u8, "hue_user", b.option([]const u8, "hue_user", "Hue API username (default: saved, else pairing)") orelse "");
+    // On-board LED level, 1..255. A WS2812 at full power is blinding on a desk, but Wokwi
+    // draws the raw value, so low levels look black there: use 255 in the simulator.
+    options.addOption(u8, "led_level", b.option(u8, "led_level", "On-board LED level 1..255 (default: 40)") orelse 40);
+    // Touch screen (ILI9341 + FT6206) on SPI2; the LED is on RMT, so both work.
     options.addOption(bool, "screen", b.option(bool, "screen", "ILI9341 + FT6206 touch screen (default: true)") orelse true);
     options.addOption([]const u8, "hue_light", b.option([]const u8, "hue_light", "Light id to open on (required with -Dscreen=false)") orelse "");
 
@@ -38,4 +42,15 @@ pub fn build(b: *std.Build) void {
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
+
+    // The pure parts (mDNS packets, the scenes JSON, UTF-8 folding) run on the host:
+    // `zig build test`.
+    const test_step = b.step("test", "Run the host tests");
+    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig", "src/font.zig" }) |file| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(file),
+            .target = b.graph.host,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 }

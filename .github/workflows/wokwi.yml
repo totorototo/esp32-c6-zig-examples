@@ -54,7 +54,7 @@ jobs:
             expect: "wifinvs test: PASS"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -64,6 +64,12 @@ jobs:
         working-directory: ${{ matrix.sample }}
         # The first build after fetching MicroZig sometimes stops in regz; a second run works.
         run: zig build -Doptimize=ReleaseSmall || zig build -Doptimize=ReleaseSmall
+
+      - name: Host tests
+        working-directory: ${{ matrix.sample }}
+        # Only samples with pure parts (hue's mDNS and JSON readers) have a test step.
+        run: |
+          if zig build -l | grep -q '^  test '; then zig build test --summary all; else echo "no host tests"; fi
 
       - name: Install wokwi-cli
         if: matrix.expect != '' && env.WOKWI_CLI_TOKEN != ''

@@ -1,15 +1,18 @@
-//! hue: toggle a Philips Hue light from the ESP32-C6 through the bridge's local API.
+//! hue: a Philips Hue remote on the ESP32-C6, through the bridge's local API.
 //!
-//!   1. Fetches `/api/config` and logs the bridge name (no pairing needed).
-//!   2. Without `-Dhue_user`: pairing mode. Press the bridge's link button; the board logs
-//!      the username to rebuild with.
-//!   3. With `-Dhue_user`: logs the lights, rooms and zones, then controls them:
-//!      - Touch screen (ILI9341 + FT6206, `-Dscreen=true`, the default): a list of lights
-//!        and rooms, and a settings page for the one picked (on/off, brightness, colour).
-//!        `-Dhue_light` opens on that light. It also shows boot and pairing status.
+//!   1. Finds the bridge: `-Dhue_ip`, else the address saved in flash, else an mDNS search.
+//!      Fetches `/api/config` and logs the bridge name (no pairing needed).
+//!   2. Gets a username: `-Dhue_user`, else the one saved in flash, else pairing (press the
+//!      bridge's link button). A paired username is saved, so pairing happens once.
+//!   3. Logs the lights, rooms, zones and scenes, then controls them:
+//!      - Touch screen (ILI9341 + FT6206, `-Dscreen=true`, the default): lights, rooms and
+//!        scenes, and a settings page for the light or room picked (on/off, brightness,
+//!        colour). It reopens on the last one picked (or `-Dhue_light`).
 //!      - Web remote on port 80, on the selected entry: on/off, brightness, colour.
-//!      - Without the screen, `-Dhue_light` picks the light and the on-board LED mirrors it.
+//!      - The on-board LED (RMT, GPIO8) shows the status, then mirrors the selected entry.
 //!      What's on screen is refreshed every 5 s.
+//!   Holding the BOOT button for 3 s (or `POST /forget`) forgets the bridge and the username
+//!   and restarts.
 //! Logs go to UART0 (115200 baud).
 const std = @import("std");
 const microzig = @import("microzig");
@@ -22,14 +25,16 @@ const catalog = @import("catalog.zig");
 const screen = @import("screen.zig");
 const ili9341 = @import("ili9341.zig");
 const ft6206 = @import("ft6206.zig");
+const settings = @import("settings.zig");
 const lwip = net.lwip;
 
 const hal = microzig.hal;
 const gpio = hal.gpio;
 const rtos = hal.rtos;
 const radio = hal.radio;
-const WS2812 = microzig.drivers.led.WS2812;
-const Color = microzig.drivers.led.ws2812.Color;
+const rmt = hal.rmt;
+const WS2812 = hal.drivers.WS2812_RMT;
+const Color = WS2812.Color;
 
 comptime {
     _ = net.exports;
@@ -93,46 +98,62 @@ const screen_pins: ili9341.Pins = .{
 const touch_sda = gpio.num(22);
 const touch_scl = gpio.num(23);
 
-const Led = WS2812(.{ .max_led_count = 1, .DatagramDevice = hal.drivers.SPI_Device });
-var led: Led = undefined;
+// The on-board WS2812 through RMT, so it works next to the screen (which takes SPI2).
+const led_pin = gpio.num(8);
+const led_channel = rmt.instance.TX0;
+const rmt_config: rmt.Config = .{ .clock_config = hal.clock_config };
+const led_channel_config: rmt.Tx.Config = .{};
+var led: WS2812 = undefined;
+
+/// The BOOT button: low while pressed (pulled up on the board). Held 3 s, it forgets the
+/// saved bridge and username.
+const boot_button = gpio.num(9);
+const forget_hold_ms = 3000;
 
 var heap: microzig.Allocator = undefined;
 
+var user_buf: [64]u8 = undefined;
+
 pub fn main() !void {
-    std.log.info("hue on ESP32-C6, bridge {s}", .{config.hue_ip});
+    std.log.info("hue on ESP32-C6", .{});
+    init_led();
     if (config.screen) {
         ili9341.init(screen_pins);
         if (ft6206.init(touch_sda, touch_scl)) {
             screen.touch_ok = true;
         } else |err| std.log.warn("touch controller not found ({t}): screen is display-only", .{err});
-    } else init_led();
+    }
+    boot_button.apply(.{ .input_enable = true, .pull = .up });
+    settings.init();
     status(.busy, "CONNECTING");
 
     heap = try .init_with_heap(16384);
     try net.up(heap.allocator());
 
-    const bridge = try hue.Bridge.init(config.hue_ip);
-    {
-        var arena: std.heap.ArenaAllocator = .init(heap.allocator());
-        defer arena.deinit();
-        const cfg = hue.get_config(arena.allocator(), bridge) catch |err| {
-            std.log.err("bridge at {s} not reachable: {t}", .{ config.hue_ip, err });
-            status(.failed, "BRIDGE NOT\nREACHABLE");
-            return err;
-        };
-        std.log.info("bridge `{s}` id {s}, API {s}", .{ cfg.name, cfg.bridgeid, cfg.apiversion });
-    }
+    const bridge = try find_bridge();
 
-    if (config.hue_user.len == 0) return pair(bridge);
+    var from_flash = false;
+    const user: []const u8 = if (config.hue_user.len > 0) config.hue_user else if (settings.get(.user, &user_buf)) |u| blk: {
+        from_flash = true;
+        break :blk u;
+    } else try pair(bridge);
 
-    const ctx: catalog.Context = .{ .bridge = bridge, .user = config.hue_user, .allocator = heap.allocator() };
+    const ctx: catalog.Context = .{ .bridge = bridge, .user = user, .allocator = heap.allocator() };
     catalog.refresh(ctx, .light) catch |err| {
         // The common cause: a username from another bridge, or one deleted in the Hue app.
-        if (err == error.BridgeError) std.log.err("rebuild without -Dhue_user to pair again", .{});
+        if (err == error.BridgeError) {
+            if (from_flash) {
+                std.log.err("the bridge rejected the saved username: forgetting it, pairing again", .{});
+                settings.erase(.user);
+                restart();
+            }
+            std.log.err("rebuild without -Dhue_user to pair again", .{});
+        }
         status(.failed, "BRIDGE REJECTED\nTHE USERNAME");
         return err;
     };
     catalog.refresh(ctx, .group) catch |err| std.log.warn("rooms and zones not read: {t}", .{err});
+    catalog.refresh_scenes(ctx) catch |err| std.log.warn("scenes not read: {t}", .{err});
     catalog.log_all();
 
     if (config.hue_light.len > 0) {
@@ -141,7 +162,16 @@ pub fn main() !void {
             status(.failed, "NO SUCH LIGHT\nSEE THE LOG");
             return error.NoSuchLight;
         }
-        if (config.screen) screen.open(catalog.selected().?);
+    } else {
+        // The light or room last opened, if it still exists.
+        var buf: [16]u8 = undefined;
+        if (settings.get(.selected, &buf)) |sel| if (sel.len > 1) {
+            const kind: hue.Kind = if (sel[0] == 'g') .group else .light;
+            _ = catalog.select_id(kind, sel[1..]);
+        };
+    }
+    if (catalog.selected()) |e| {
+        if (config.screen) screen.open(e);
     } else if (!config.screen) {
         // Without the screen, nothing else can pick a light.
         std.log.info("rebuild with -Dhue_light=<id> to control one of these", .{});
@@ -151,23 +181,121 @@ pub fn main() !void {
     try control(ctx);
 }
 
-fn pair(bridge: hue.Bridge) !void {
+/// The bridge to talk to: `-Dhue_ip`, else the saved address if the bridge still answers
+/// there, else the first one found by mDNS. The one that answers is saved.
+///
+/// Never gives up: after a power cut the board boots faster than the bridge, and a remote
+/// that stopped at "no bridge" would stay dead until someone resets it. Holding BOOT while
+/// it waits forgets the saved address.
+fn find_bridge() !hue.Bridge {
+    const fixed: ?hue.Bridge = if (config.hue_ip.len > 0) try hue.Bridge.init(config.hue_ip) else null;
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        if (try_bridge(fixed)) |b| return b;
+        if (attempt == 0) {
+            if (fixed) |b| {
+                std.log.err("no bridge answering at {s} (-Dhue_ip): retrying every {} s", .{ b.host(), retry_ms / 1000 });
+            } else {
+                std.log.err("no Hue bridge found on this network: retrying every {} s. " ++
+                    "Where mDNS can't reach the LAN (Wokwi), rebuild with -Dhue_ip=<address>", .{retry_ms / 1000});
+            }
+        }
+        status(.failed, if (fixed != null) "BRIDGE NOT\nREACHABLE" else "NO BRIDGE FOUND\nRETRYING");
+        wait_or_forget(retry_ms);
+    }
+}
+
+const retry_ms = 10_000;
+
+fn try_bridge(fixed: ?hue.Bridge) ?hue.Bridge {
+    if (fixed) |b| {
+        if (!reach(b)) return null;
+        settings.set(.bridge_ip, b.host());
+        return b;
+    }
+
+    var buf: [16]u8 = undefined;
+    if (settings.get(.bridge_ip, &buf)) |ip| {
+        if (hue.Bridge.init(ip)) |b| {
+            if (reach(b)) return b;
+            std.log.warn("no bridge at the saved address {s}: searching", .{ip});
+        } else |_| settings.erase(.bridge_ip);
+    }
+
+    status(.busy, "SEARCHING\nFOR THE BRIDGE");
+    std.log.info("searching for a Hue bridge (mDNS _hue._tcp.local)", .{});
+    const found = hue.discover(3) catch |err| {
+        std.log.warn("mDNS search failed: {t}", .{err});
+        return null;
+    } orelse return null;
+    std.log.info("found a bridge at {s}", .{found.host()});
+    if (!reach(found)) return null;
+    settings.set(.bridge_ip, found.host());
+    return found;
+}
+
+/// Sleeps `ms`, restarting from scratch if BOOT is held for `forget_hold_ms` meanwhile.
+fn wait_or_forget(ms: u32) void {
+    const step = 100;
+    var held: u32 = 0;
+    for (0..ms / step) |_| {
+        rtos.sleep(.from_ms(step));
+        held = if (boot_button.read() == 0) held + step else 0;
+        if (held >= forget_hold_ms) forget();
+    }
+}
+
+/// Fetches `/api/config` (no username needed) and logs who answered.
+fn reach(b: hue.Bridge) bool {
+    var arena: std.heap.ArenaAllocator = .init(heap.allocator());
+    defer arena.deinit();
+    const cfg = hue.get_config(arena.allocator(), b) catch |err| {
+        std.log.warn("no bridge answering at {s}: {t}", .{ b.host(), err });
+        return false;
+    };
+    std.log.info("bridge `{s}` at {s}, id {s}, API {s}", .{ cfg.name, b.host(), cfg.bridgeid, cfg.apiversion });
+    return true;
+}
+
+/// Pairs with the bridge and saves the username. Returns it, or restarts after 60 s
+/// without a link button press.
+fn pair(bridge: hue.Bridge) ![]const u8 {
     std.log.info("pairing: press the round link button on the bridge (trying for 60 s)", .{});
     status(.waiting, "PRESS THE LINK\nBUTTON ON BRIDGE");
     for (0..30) |_| {
         var arena: std.heap.ArenaAllocator = .init(heap.allocator());
         defer arena.deinit();
         if (try hue.create_user(arena.allocator(), bridge, devicetype)) |user| {
-            // The username is a bridge credential: it goes on the build command line only,
-            // and not on the screen.
-            std.log.info("paired. Rebuild with: zig build -Doptimize=ReleaseSmall -Dhue_user={s}", .{user});
-            status(.ok, "PAIRED\nSEE THE LOG");
-            return;
+            if (user.len > user_buf.len) return error.BadResponse;
+            @memcpy(user_buf[0..user.len], user);
+            // A bridge credential: saved in flash and logged once, never shown on screen.
+            // The log line is for Wokwi, whose flash starts blank on every run.
+            settings.set(.user, user);
+            std.log.info("paired, username saved. To skip pairing where flash isn't kept (Wokwi): -Dhue_user={s}", .{user});
+            status(.ok, "PAIRED");
+            return user_buf[0..user.len];
         }
         rtos.sleep(.from_ms(2000));
     }
     std.log.err("link button not pressed in time; restart to try again", .{});
     status(.failed, "NO LINK BUTTON\nRESTART TO RETRY");
+    return error.NotPaired;
+}
+
+/// Forgets what pairing and discovery saved, then restarts.
+fn forget() noreturn {
+    std.log.info("forgetting the bridge and the username", .{});
+    settings.erase(.user);
+    settings.erase(.bridge_ip);
+    settings.erase(.selected);
+    status(.waiting, "FORGOTTEN\nRESTARTING");
+    restart();
+}
+
+fn restart() noreturn {
+    rtos.sleep(.from_ms(500)); // let the log and the screen catch up
+    // A CPU reset reboots through the ROM like a system reset, and also works in Wokwi.
+    hal.rom.software_reset_cpu();
 }
 
 // ---- control: touch screen + web remote + periodic refresh, in one loop ----
@@ -190,6 +318,7 @@ fn control(ctx: catalog.Context) !void {
 
     var last_refresh = now_ms();
     var mirrored: ?hue.LightState = null;
+    var button_down_since: ?u64 = null;
 
     while (true) {
         var client: ?*lwip.c.netconn = null;
@@ -221,10 +350,19 @@ fn control(ctx: catalog.Context) !void {
             result catch |err| std.log.warn("refresh failed: {t}", .{err});
         }
 
-        if (!config.screen) if (catalog.selected()) |e| {
+        if (catalog.selected()) |e| {
             if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
             mirrored = e.state;
-        };
+        } else if (mirrored != null) {
+            show(.{ .r = 0, .g = 0, .b = 0 });
+            mirrored = null;
+        }
+
+        if (boot_button.read() == 0) {
+            const since = button_down_since orelse t;
+            button_down_since = since;
+            if (t - since >= forget_hold_ms) forget();
+        } else button_down_since = null;
     }
 }
 
@@ -243,6 +381,11 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
 
     if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
     if (req.is("GET", "/state")) return respond_state(conn);
+    if (req.is("POST", "/forget")) {
+        try web.respond(conn, "200 OK", "text/plain", "forgetting the bridge and the username, restarting\n");
+        _ = lwip.c.netconn_close(conn);
+        forget();
+    }
     if (req.is("POST", "/set")) {
         const change = parse_change(req.query) catch
             return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
@@ -290,31 +433,30 @@ fn respond_state(conn: *lwip.c.netconn) !void {
     return web.respond(conn, "200 OK", "application/json", json);
 }
 
-// ---- status: on the screen, or on the on-board LED ----
+// ---- status: on the screen and the on-board LED ----
 
 const Status = enum { busy, waiting, ok, failed };
 
 fn status(kind: Status, text: []const u8) void {
-    if (config.screen) return ui.message(text, switch (kind) {
+    if (config.screen) ui.message(text, switch (kind) {
         .busy => ili9341.rgb(120, 170, 255),
         .waiting => ili9341.rgb(255, 180, 60),
         .ok => ili9341.rgb(110, 230, 120),
         .failed => ili9341.rgb(255, 90, 70),
     });
-    show(switch (kind) {
-        .busy => .{ .r = 0, .g = 0, .b = 8 },
-        .waiting => .{ .r = 16, .g = 8, .b = 0 },
-        .ok => .{ .r = 0, .g = 8, .b = 0 },
-        .failed => .{ .r = 16, .g = 0, .b = 0 },
-    });
+    // Blue = starting, orange = waiting for you, green = done, red = error.
+    show(scale(switch (kind) {
+        .busy => .{ .r = 0, .g = 0, .b = 255 },
+        .waiting => .{ .r = 255, .g = 128, .b = 0 },
+        .ok => .{ .r = 0, .g = 255, .b = 0 },
+        .failed => .{ .r = 255, .g = 0, .b = 0 },
+    }, config.led_level / 2 + 1));
 }
 
-/// Shows the light's colour on the LED, dimmed: a WS2812 at full power is blinding.
-/// With the screen, the screen shows it instead, and SPI2 belongs to it.
+/// Shows the light's colour on the LED, scaled by its brightness and `-Dled_level`.
 fn mirror(light: hue.LightState) void {
-    if (config.screen) return;
     if (!light.on) return show(.{ .r = 0, .g = 0, .b = 0 });
-    const v: u32 = @max(@as(u32, light.bri orelse 254) * 40 / 254, 2);
+    const v: u32 = @max(@as(u32, light.bri orelse 254) * config.led_level / 254, 2);
     if (light.hue == null or light.sat == null) return show(scale(.{ .r = 255, .g = 160, .b = 60 }, v));
     const c = ui.hsv_to_rgb(light.hue.?, light.sat.?);
     return show(scale(.{ .r = c.r, .g = c.g, .b = c.b }, v));
@@ -333,15 +475,12 @@ fn now_ms() u64 {
 }
 
 fn init_led() void {
-    const pin = gpio.num(8);
-    const spi = hal.spi.instance.SPI2;
-    pin.apply(.{ .output_enable = true });
-    spi.connect_pins(.{ .data = .{ .single_one_wire = pin } });
-    spi.apply(.{ .clock_config = hal.clock_config, .baud_rate = 3_000_000, .bit_order = .msb_first });
-    led = .init(.init(spi, .single_one_wire, null), hal.drivers.clock_device());
+    rmt.apply(rmt_config);
+    led_channel.apply(led_channel_config);
+    led_channel.connect_pin(led_pin);
+    led = .init(led_channel, comptime led_channel_config.tick_freq(rmt_config), .{});
 }
 
 fn show(color: Color) void {
-    if (config.screen) return;
-    led.write(&.{color}) catch {};
+    led.write(&.{color}) catch |err| std.log.warn("LED write failed: {t}", .{err});
 }

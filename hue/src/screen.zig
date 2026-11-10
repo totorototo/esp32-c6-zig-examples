@@ -5,13 +5,14 @@ const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const ui = @import("ui.zig");
 const ft6206 = @import("ft6206.zig");
+const settings = @import("settings.zig");
 
 const log = std.log.scoped(.screen);
 
 pub const Page = enum { list, settings };
 
 pub var page: Page = .list;
-var tab: hue.Kind = .light;
+var tab: ui.Tab = .lights;
 var list_page: u8 = 0;
 /// Set when navigation shows something whose state may be stale.
 var refresh_wanted = false;
@@ -36,11 +37,26 @@ const Touch = struct {
 };
 var touch: Touch = .{};
 
-/// Opens the settings page of `e`.
+/// Opens the settings page of `e`, and remembers it for the next boot.
 pub fn open(e: *const catalog.Entry) void {
     catalog.select(e);
     page = .settings;
+    tab = if (e.kind == .light) .lights else .rooms;
     refresh_wanted = true;
+    var buf: [9]u8 = undefined;
+    settings.set(.selected, std.fmt.bufPrint(&buf, "{c}{s}", .{ @as(u8, if (e.kind == .light) 'l' else 'g'), e.id() }) catch return);
+}
+
+fn kind_of(t: ui.Tab) ?hue.Kind {
+    return switch (t) {
+        .lights => .light,
+        .rooms => .group,
+        .scenes => null,
+    };
+}
+
+fn tab_len(t: ui.Tab) usize {
+    return if (kind_of(t)) |k| catalog.list(k).len else catalog.scenes.len;
 }
 
 /// True while a finger is on the panel: the main loop holds off its periodic refresh so a
@@ -58,7 +74,11 @@ pub fn take_refresh_request() bool {
 /// Re-reads what the screen shows: the open tab's list, or the selected entry.
 pub fn refresh(ctx: catalog.Context) !void {
     switch (page) {
-        .list => try catalog.refresh(ctx, tab),
+        .list => if (kind_of(tab)) |k| try catalog.refresh(ctx, k) else {
+            // Scene rows show their room's name.
+            if (catalog.groups.len == 0) try catalog.refresh(ctx, .group);
+            try catalog.refresh_scenes(ctx);
+        },
         .settings => if (catalog.selected()) |e| try catalog.refresh_entry(ctx, e),
     }
 }
@@ -73,9 +93,17 @@ fn render() void {
         if (catalog.selected()) |e| return ui.render_settings(e.name(), preview(e.state));
         page = .list; // the entry disappeared from the bridge
     }
-    const l = catalog.list(tab);
-    list_page = @min(list_page, ui.page_count(l.len) - 1);
-    ui.render_list(tab, list_page, l.slice());
+    const n = tab_len(tab);
+    const pages = ui.page_count(n);
+    list_page = @min(list_page, pages - 1);
+    const first = @as(usize, list_page) * ui.rows_per_page;
+    const count = @min(ui.rows_per_page, n -| first);
+    var rows: [ui.rows_per_page]ui.Row = undefined;
+    for (rows[0..count], first..) |*row, i| row.* = if (kind_of(tab)) |k|
+        .of_entry(&catalog.list(k).items[i])
+    else
+        .of_scene(&catalog.scenes.items[i]);
+    ui.render_list(tab, list_page, pages, rows[0..count]);
 }
 
 /// The entry as the screen should show it: a pending slider value wins.
@@ -138,20 +166,27 @@ fn poll(ctx: catalog.Context, t: u64) void {
 }
 
 fn list_touched(ctx: catalog.Context, p: ft6206.Point) void {
-    const entries = catalog.list(tab).slice();
-    switch (ui.list_hit(p, list_page, entries.len)) {
+    const n = tab_len(tab);
+    switch (ui.list_hit(p, list_page, n)) {
         .none => {},
-        .tab => |kind| if (kind != tab) {
-            tab = kind;
+        .tab => |t| if (t != tab) {
+            tab = t;
             list_page = 0;
             refresh_wanted = true;
         },
         .prev => list_page -|= 1,
-        .next => if (list_page + 1 < ui.page_count(entries.len)) {
+        .next => if (list_page + 1 < ui.page_count(n)) {
             list_page += 1;
         },
-        .toggle => |i| catalog.apply(ctx, &entries[i], .{ .on = !entries[i].state.on }),
-        .open => |i| open(&entries[i]),
+        // A scene row has one action, wherever it's tapped.
+        .toggle => |i| if (kind_of(tab)) |k| {
+            const e = &catalog.list(k).items[i];
+            catalog.apply(ctx, e, .{ .on = !e.state.on });
+        } else catalog.recall(ctx, &catalog.scenes.items[i]),
+        .open => |i| if (kind_of(tab)) |k|
+            open(&catalog.list(k).items[i])
+        else
+            catalog.recall(ctx, &catalog.scenes.items[i]),
     }
 }
 

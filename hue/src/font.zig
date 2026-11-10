@@ -1,6 +1,7 @@
 //! Minimal 5x7 font, defined as pixel art and turned into column bytes at comptime.
-//! Covers space, digits, A-Z (lowercase is drawn as uppercase) and `: . - / % ! ' ( ) _ +`.
-//! Unknown characters render as a hollow box.
+//! Covers space, digits, A-Z (lowercase is drawn as uppercase) and `: . - / % ! ' ( ) _ + < > , ? & "`.
+//! Unknown characters render as a hollow box. UTF-8 text goes through `Chars`, which folds
+//! accented Latin letters to their base letter (É -> E) so French names stay readable.
 
 pub const width = 5;
 pub const height = 7;
@@ -45,6 +46,12 @@ const art = [_]Entry{
     .{ ')', .{ ".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..." } },
     .{ '_', .{ ".....", ".....", ".....", ".....", ".....", ".....", "#####" } },
     .{ '+', .{ ".....", "..#..", "..#..", "#####", "..#..", "..#..", "....." } },
+    .{ '<', .{ "...#.", "..#..", ".#...", "#....", ".#...", "..#..", "...#." } },
+    .{ '>', .{ ".#...", "..#..", "...#.", "....#", "...#.", "..#..", ".#..." } },
+    .{ ',', .{ ".....", ".....", ".....", ".....", ".##..", "..#..", ".#..." } },
+    .{ '?', .{ ".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.." } },
+    .{ '&', .{ ".##..", "#..#.", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#" } },
+    .{ '"', .{ ".#.#.", ".#.#.", ".....", ".....", ".....", ".....", "....." } },
     .{ '0', .{ ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###." } },
     .{ '1', .{ "..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###." } },
     .{ '2', .{ ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####" } },
@@ -83,9 +90,70 @@ const art = [_]Entry{
     .{ 'Z', .{ "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####" } },
 };
 
+test "punctuation used by the UI has glyphs" {
+    const box = glyph(0);
+    for ("<>,?&\"") |c| try std.testing.expect(!std.mem.eql(u8, &glyph(c), &box));
+}
+
 test "digit one" {
-    const std = @import("std");
     // Column 2 of '1' is the vertical stroke: rows 0..6 set.
     try std.testing.expectEqual(@as(u8, 0x7f), glyph('1')[2]);
     try std.testing.expectEqual(glyph('a'), glyph('A'));
+}
+
+/// Iterates UTF-8 text as font characters: one per code point, accents folded, unknown code
+/// points (and invalid bytes) as 0, which draws the box.
+pub const Chars = struct {
+    s: []const u8,
+    i: usize = 0,
+
+    pub fn next(it: *Chars) ?u8 {
+        if (it.i >= it.s.len) return null;
+        const b = it.s[it.i];
+        if (b < 0x80) {
+            it.i += 1;
+            return b;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(b) catch {
+            it.i += 1;
+            return 0;
+        };
+        if (it.i + len > it.s.len) {
+            it.i = it.s.len;
+            return 0;
+        }
+        const cp = std.unicode.utf8Decode(it.s[it.i..][0..len]) catch {
+            it.i += 1;
+            return 0;
+        };
+        it.i += len;
+        return fold(cp);
+    }
+};
+
+/// U+00C0..U+00FF without accents; lowercase folds to uppercase, as the font draws it.
+const latin1 = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPSAAAAAAACEEEEIIIIDNOOOOO/OUUUUYPY";
+
+fn fold(cp: u21) u8 {
+    return switch (cp) {
+        0xC0...0xFF => latin1[cp - 0xC0],
+        0x152, 0x153 => 'O', // Œ œ
+        0x178 => 'Y', // Ÿ
+        0x2010...0x2015 => '-', // dashes
+        0x2018, 0x2019 => '\'', // curly apostrophes
+        else => 0,
+    };
+}
+
+const std = @import("std");
+
+test "accents fold" {
+    const expect = std.testing.expectEqual;
+    var out: [32]u8 = undefined;
+    var n: usize = 0;
+    var it: Chars = .{ .s = "Étoile Aloïse – Œuf’s \xff\xfe" };
+    while (it.next()) |c| : (n += 1) out[n] = c;
+    try std.testing.expectEqualStrings("Etoile AloIse - Ouf's \x00\x00", out[0..n]);
+    try expect(@as(u8, 'C'), fold(0xE7)); // ç
+    try expect(@as(u8, 0), fold(0x4E2D)); // a CJK character: box
 }

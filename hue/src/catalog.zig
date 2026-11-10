@@ -164,6 +164,120 @@ pub fn apply(ctx: Context, e: *Entry, change: hue.Change) void {
     });
 }
 
+// ---- scenes ----
+
+/// Eight pages of six.
+/// Sixteen pages of six. A bridge has about ten per room, from the app's gallery.
+pub const max_scenes = 96;
+
+pub const Scene = struct {
+    /// Scene ids are 15-16 characters.
+    id_buf: [16]u8 = undefined,
+    id_len: u8 = 0,
+    name_buf: [32]u8 = undefined,
+    name_len: u8 = 0,
+    /// Empty for a LightScene, which belongs to no room.
+    group_buf: [8]u8 = undefined,
+    group_len: u8 = 0,
+
+    pub fn id(s: *const Scene) []const u8 {
+        return s.id_buf[0..s.id_len];
+    }
+
+    pub fn name(s: *const Scene) []const u8 {
+        return s.name_buf[0..s.name_len];
+    }
+
+    /// The group to recall it on: its room or zone, or 0 (all lights).
+    pub fn group(s: *const Scene) []const u8 {
+        return if (s.group_len == 0) "0" else s.group_buf[0..s.group_len];
+    }
+
+    /// The room or zone's name, as last read; "" when unknown.
+    pub fn room(s: *const Scene) []const u8 {
+        if (s.group_len == 0) return "ALL LIGHTS";
+        const g = groups.find(s.group_buf[0..s.group_len]) orelse return "";
+        return g.name();
+    }
+};
+
+pub const SceneList = struct {
+    items: [max_scenes]Scene = undefined,
+    len: usize = 0,
+    /// Scenes left out because the list was full.
+    dropped: usize = 0,
+
+    pub fn slice(l: *SceneList) []Scene {
+        return l.items[0..l.len];
+    }
+
+    pub fn add(l: *SceneList, info: @import("scenes.zig").Scene) void {
+        if (info.recycle or info.name.len == 0) return;
+        const group_id = info.group orelse "";
+        if (l.len == max_scenes) {
+            l.dropped += 1;
+            return;
+        }
+        if (info.id.len > 16 or group_id.len > 8) {
+            log.warn("skipping scene {s} `{s}`: id too long", .{ info.id, info.name });
+            return;
+        }
+        const sc = &l.items[l.len];
+        sc.* = .{ .id_len = @intCast(info.id.len), .group_len = @intCast(group_id.len) };
+        @memcpy(sc.id_buf[0..info.id.len], info.id);
+        @memcpy(sc.group_buf[0..group_id.len], group_id);
+        const trimmed = std.mem.trimEnd(u8, info.name, " ");
+        sc.name_len = @intCast(@min(trimmed.len, sc.name_buf.len));
+        @memcpy(sc.name_buf[0..sc.name_len], trimmed[0..sc.name_len]);
+        l.len += 1;
+    }
+};
+
+pub var scenes: SceneList = .{};
+var scene_scratch: SceneList = .{};
+
+/// The scene last recalled from here, by id; the list shows it highlighted.
+var recalled_buf: [16]u8 = undefined;
+var recalled_len: usize = 0;
+
+pub fn is_recalled(sc: *const Scene) bool {
+    return recalled_len > 0 and std.mem.eql(u8, sc.id(), recalled_buf[0..recalled_len]);
+}
+
+/// Replaces the scene list, sorted by room, then name. Room names come from `groups`, so
+/// refresh those first.
+pub fn refresh_scenes(ctx: Context) !void {
+    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
+    defer arena.deinit();
+    const fresh = &scene_scratch;
+    fresh.len = 0;
+    fresh.dropped = 0;
+    try hue.get_scenes(arena.allocator(), ctx.bridge, ctx.user, fresh);
+    if (fresh.dropped > 0) log.warn("{} scenes left out: the list holds {}", .{ fresh.dropped, max_scenes });
+    std.mem.sort(Scene, fresh.slice(), {}, scene_less);
+    scenes = fresh.*;
+}
+
+fn scene_less(_: void, a: Scene, b: Scene) bool {
+    const ra = a.room();
+    const rb = b.room();
+    if (!std.mem.eql(u8, ra, rb)) return std.ascii.lessThanIgnoreCase(ra, rb);
+    return std.ascii.lessThanIgnoreCase(a.name(), b.name());
+}
+
+/// Recalls `sc` on its room. The lights' new states show up with the next refresh.
+pub fn recall(ctx: Context, sc: *const Scene) void {
+    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
+    defer arena.deinit();
+    hue.recall_scene(arena.allocator(), ctx.bridge, ctx.user, sc.group(), sc.id()) catch |err| {
+        log.err("recall scene {s} failed: {t}", .{ sc.id(), err });
+        return;
+    };
+    recalled_len = sc.id_len;
+    @memcpy(recalled_buf[0..recalled_len], sc.id());
+    log.info("scene `{s}` recalled on `{s}`", .{ sc.name(), sc.room() });
+}
+
 pub fn log_all() void {
     for ([_]hue.Kind{ .light, .group }) |kind| {
         const l = list(kind);
@@ -172,4 +286,6 @@ pub fn log_all() void {
             e.id(), e.name(), if (e.state.on) "on" else "off", if (e.state.reachable) "" else ", unreachable",
         });
     }
+    log.info("{} scenes:", .{scenes.len});
+    for (scenes.slice()) |*sc| log.info("  {s}: {s} ({s})", .{ sc.id(), sc.name(), sc.room() });
 }

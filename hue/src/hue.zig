@@ -2,15 +2,30 @@
 const std = @import("std");
 const net = @import("net");
 const lwip = net.lwip;
+const mdns = @import("mdns.zig");
+const scenes = @import("scenes.zig");
 
 const log = std.log.scoped(.hue);
 
 pub const Bridge = struct {
     addr: lwip.c.ip_addr_t,
-    host: []const u8,
+    host_buf: [15]u8,
+    host_len: u8,
 
     pub fn init(ip: []const u8) !Bridge {
-        return .{ .addr = try parse_ipv4(ip), .host = ip };
+        return from_octets(try parse_ipv4(ip));
+    }
+
+    pub fn from_octets(octets: [4]u8) Bridge {
+        var b: Bridge = .{ .addr = std.mem.zeroes(lwip.c.ip_addr_t), .host_buf = undefined, .host_len = 0 };
+        b.addr = ip_addr(octets);
+        b.host_len = @intCast((std.fmt.bufPrint(&b.host_buf, "{}.{}.{}.{}", .{ octets[0], octets[1], octets[2], octets[3] }) catch unreachable).len);
+        return b;
+    }
+
+    /// Dotted IPv4 text, as sent in the Host header and stored in the settings.
+    pub fn host(b: *const Bridge) []const u8 {
+        return b.host_buf[0..b.host_len];
     }
 };
 
@@ -103,6 +118,50 @@ pub fn create_user(arena: std.mem.Allocator, bridge: Bridge, devicetype: []const
     return user.string;
 }
 
+/// Asks the LAN for a Hue bridge over mDNS (see mdns.zig) and returns the first one that
+/// answers, or null after `tries` queries a second apart.
+pub fn discover(tries: u8) !?Bridge {
+    const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_UDP, 0, null) orelse
+        return error.OutOfMemory;
+    defer _ = lwip.c.netconn_delete(conn);
+    try lwip.c_err(lwip.c.netconn_bind(conn, null, 0)); // any address, ephemeral port
+    conn[0].recv_timeout = 1000;
+
+    var query_buf: [64]u8 = undefined;
+    const query = mdns.build_query(&query_buf);
+    const group = ip_addr(mdns.group);
+
+    for (0..tries) |_| {
+        {
+            const out = lwip.c.netbuf_new() orelse return error.OutOfMemory;
+            defer lwip.c.netbuf_delete(out);
+            try lwip.c_err(lwip.c.netbuf_ref(out, query.ptr, @intCast(query.len)));
+            try lwip.c_err(lwip.c.netconn_sendto(conn, out, &group, mdns.port));
+        }
+        // Other devices may answer too (they shouldn't for this name, but some do): keep
+        // reading until the timeout.
+        while (true) {
+            var in: ?*lwip.c.netbuf = null;
+            lwip.c_err(lwip.c.netconn_recv(conn, &in)) catch |err| switch (err) {
+                error.Timeout => break,
+                else => return err,
+            };
+            defer lwip.c.netbuf_delete(in);
+            var buf: [1500]u8 = undefined;
+            const n = lwip.c.pbuf_copy_partial(in.?.p, &buf, buf.len, 0);
+            const answer = mdns.parse(buf[0..n]) catch |err| {
+                log.debug("ignoring mDNS packet: {t}", .{err});
+                continue;
+            };
+            if (!answer.service) continue;
+            // Without an A record in the answer, the sender is the bridge.
+            const octets = answer.addr orelse octets_of(in.?.addr);
+            return Bridge.from_octets(octets);
+        }
+    }
+    return null;
+}
+
 pub fn get_lights(arena: std.mem.Allocator, bridge: Bridge, user: []const u8) !std.json.ArrayHashMap(Light) {
     var path: [96]u8 = undefined;
     const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/lights", .{user}), "");
@@ -135,6 +194,28 @@ pub fn get(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, target: T
             return (try parse(Group, arena, body)).as_light();
         },
     };
+}
+
+/// Calls `sink.add(scene)` for each scene (see scenes.zig). Slices are only valid during the
+/// call.
+pub fn get_scenes(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, sink: anytype) !void {
+    var path: [96]u8 = undefined;
+    const body = try request(bridge, "GET", try std.fmt.bufPrint(&path, "/api/{s}/scenes", .{user}), "");
+    try check_error(arena, body);
+    var scratch: [1024]u8 = undefined;
+    scenes.parse(body, &scratch, sink) catch |err| {
+        log.err("unexpected scenes JSON ({t}): {s}", .{ err, body[0..@min(body.len, 160)] });
+        return error.BadResponse;
+    };
+}
+
+/// Recalls a scene on its group: a room or zone, or group 0 (all lights) for a LightScene.
+pub fn recall_scene(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, group: []const u8, scene: []const u8) !void {
+    var json_buf: [48]u8 = undefined;
+    const json = try std.fmt.bufPrint(&json_buf, "{{\"scene\":\"{s}\"}}", .{scene});
+    var path: [128]u8 = undefined;
+    const body = try request(bridge, "PUT", try std.fmt.bufPrint(&path, "/api/{s}/groups/{s}/action", .{ user, group }), json);
+    try check_error(arena, body);
 }
 
 /// Applies `change` to a light (`/state`) or to every light of a group (`/action`, same
@@ -192,7 +273,7 @@ fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u
     defer _ = lwip.c.netconn_close(conn);
 
     var head: [256]u8 = undefined;
-    const req = try std.fmt.bufPrint(&head, "{s} {s} HTTP/1.0\r\nHost: {s}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", .{ method, path, bridge.host, body.len });
+    const req = try std.fmt.bufPrint(&head, "{s} {s} HTTP/1.0\r\nHost: {s}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", .{ method, path, bridge.host(), body.len });
     try write_all(conn, req);
     if (body.len > 0) try write_all(conn, body);
 
@@ -230,15 +311,24 @@ fn write_all(conn: *lwip.c.netconn, bytes: []const u8) !void {
     try lwip.c_err(lwip.c.netconn_write_partly(conn, bytes.ptr, bytes.len, lwip.c.NETCONN_COPY, null));
 }
 
-fn parse_ipv4(s: []const u8) !lwip.c.ip_addr_t {
+fn parse_ipv4(s: []const u8) ![4]u8 {
     var octets: [4]u8 = undefined;
     var it = std.mem.splitScalar(u8, s, '.');
     for (&octets) |*o| o.* = try std.fmt.parseInt(u8, it.next() orelse return error.BadAddress, 10);
     if (it.next() != null) return error.BadAddress;
+    return octets;
+}
 
+fn ip_addr(octets: [4]u8) lwip.c.ip_addr_t {
     var addr = std.mem.zeroes(lwip.c.ip_addr_t);
     addr.type = lwip.c.IPADDR_TYPE_V4;
     // lwIP stores IPv4 addresses in network byte order.
     addr.u_addr.ip4.addr = std.mem.readInt(u32, &octets, .little);
     return addr;
+}
+
+fn octets_of(addr: lwip.c.ip_addr_t) [4]u8 {
+    var octets: [4]u8 = undefined;
+    std.mem.writeInt(u32, &octets, addr.u_addr.ip4.addr, .little);
+    return octets;
 }

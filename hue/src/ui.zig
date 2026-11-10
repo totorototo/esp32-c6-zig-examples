@@ -2,7 +2,7 @@
 //!
 //!   list                          settings
 //!   +------------------------+    +------------------------+
-//!   | LIGHTS  |  ROOMS       |    | < LIGHT NAME           |  back
+//!   | LIGHTS | ROOMS | SCENES|    | < LIGHT NAME           |  back
 //!   | [#] Hue color spot 1   |    | [        ON          ] |  tap to toggle
 //!   | [ ] Bureau             |    | BRIGHTNESS 75%         |
 //!   |  :   (6 rows a page)   |    | [#########-----------] |  drag
@@ -10,7 +10,7 @@
 //!   |                        |    | [rainbow strip    |  ] |  drag (colour only)
 //!   |   <      1/2      >    |    | [        WHITE       ] |  tap: saturation 0
 //!   +------------------------+    +------------------------+
-//!   swatch: tap toggles, name: tap opens settings
+//!   swatch: tap toggles, name: tap opens settings; on SCENES, a tap recalls the scene
 //!
 //! Both renderers redraw only what changed since the last call, so the main loop can call
 //! them every tick.
@@ -74,6 +74,20 @@ pub fn message(msg: []const u8, color: lcd.Color) void {
 
 // ---- list page ----
 
+pub const Tab = enum {
+    lights,
+    rooms,
+    scenes,
+
+    fn label(t: Tab) []const u8 {
+        return switch (t) {
+            .lights => "LIGHTS",
+            .rooms => "ROOMS",
+            .scenes => "SCENES",
+        };
+    }
+};
+
 pub const rows_per_page = 6;
 const tab_h = 40;
 const row_h = 40;
@@ -83,9 +97,9 @@ const footer: Rect = .{ .x = 0, .y = rows_y + rows_per_page * row_h + 4, .w = lc
 const prev_button: Rect = .{ .x = 0, .y = footer.y, .w = 80, .h = footer.h };
 const next_button: Rect = .{ .x = lcd.width - 80, .y = footer.y, .w = 80, .h = footer.h };
 
-fn tab_rect(kind: hue.Kind) Rect {
-    const half = lcd.width / 2;
-    return .{ .x = if (kind == .light) 0 else half, .y = 0, .w = half, .h = tab_h };
+fn tab_rect(t: Tab) Rect {
+    const w = lcd.width / 3;
+    return .{ .x = @as(u16, @intFromEnum(t)) * w, .y = 0, .w = w, .h = tab_h };
 }
 
 fn row_rect(r: usize) Rect {
@@ -98,7 +112,7 @@ pub fn page_count(entries: usize) u8 {
 
 pub const ListHit = union(enum) {
     none,
-    tab: hue.Kind,
+    tab: Tab,
     /// Indices into the tab's entries.
     toggle: usize,
     open: usize,
@@ -107,7 +121,7 @@ pub const ListHit = union(enum) {
 };
 
 pub fn list_hit(p: Point, page: u8, entries: usize) ListHit {
-    if (p.y < tab_h) return .{ .tab = if (p.x < lcd.width / 2) .light else .group };
+    if (p.y < tab_h) return .{ .tab = @enumFromInt(@min(p.x / (lcd.width / 3), 2)) };
     if (prev_button.contains(p, 0)) return .prev;
     if (next_button.contains(p, 0)) return .next;
     if (p.y < rows_y) return .none;
@@ -118,47 +132,75 @@ pub fn list_hit(p: Point, page: u8, entries: usize) ListHit {
     return if (p.x < swatch_hit_w) .{ .toggle = i } else .{ .open = i };
 }
 
+/// One row of a list, whatever it lists.
+pub const Row = struct {
+    name: []const u8,
+    /// A second, smaller line (a scene's room); empty for none.
+    sub: []const u8 = "",
+    swatch: Swatch,
+
+    pub const Swatch = union(enum) {
+        on: Rgb,
+        off,
+        unreachable_,
+        /// A scene: a play mark, filled for the one last recalled.
+        scene: bool,
+    };
+
+    pub fn of_entry(e: *const catalog.Entry) Row {
+        return .{ .name = e.name(), .swatch = if (!e.state.reachable)
+            .unreachable_
+        else if (e.state.on)
+            .{ .on = colour_of(e.state) }
+        else
+            .off };
+    }
+
+    pub fn of_scene(sc: *const catalog.Scene) Row {
+        return .{ .name = sc.name(), .sub = sc.room(), .swatch = .{ .scene = catalog.is_recalled(sc) } };
+    }
+};
+
+/// A copy of what a row shows, comparable from one frame to the next.
 const RowShown = struct {
     present: bool = false,
     name_buf: [32]u8 = @splat(0),
     name_len: u8 = 0,
-    on: bool = false,
-    reachable: bool = true,
-    colour: Rgb = .{ .r = 0, .g = 0, .b = 0 },
+    sub_buf: [32]u8 = @splat(0),
+    sub_len: u8 = 0,
+    swatch: Row.Swatch = .off,
 
-    fn of(e: *const catalog.Entry) RowShown {
-        var r: RowShown = .{ .present = true, .on = e.state.on, .reachable = e.state.reachable, .colour = colour_of(e.state) };
-        r.name_len = e.name_len;
-        @memcpy(r.name_buf[0..r.name_len], e.name());
+    fn of(row: Row) RowShown {
+        var r: RowShown = .{ .present = true, .swatch = row.swatch };
+        r.name_len = @intCast(@min(row.name.len, r.name_buf.len));
+        @memcpy(r.name_buf[0..r.name_len], row.name[0..r.name_len]);
+        r.sub_len = @intCast(@min(row.sub.len, r.sub_buf.len));
+        @memcpy(r.sub_buf[0..r.sub_len], row.sub[0..r.sub_len]);
         return r;
     }
 };
 
 const ListShown = struct {
-    kind: hue.Kind,
+    tab: Tab,
     page: u8,
     pages: u8,
     rows: [rows_per_page]RowShown,
 };
 
-/// `page` must be below `page_count(entries.len)`.
-pub fn render_list(kind: hue.Kind, page: u8, entries: []const catalog.Entry) void {
-    var now: ListShown = .{ .kind = kind, .page = page, .pages = page_count(entries.len), .rows = @splat(.{}) };
-    for (&now.rows, 0..) |*row, r| {
-        const i = @as(usize, page) * rows_per_page + r;
-        if (i < entries.len) row.* = .of(&entries[i]);
-    }
+/// Draws page `page` of `pages`. `rows` are that page's rows (at most `rows_per_page`).
+pub fn render_list(tab: Tab, page: u8, pages: u8, rows: []const Row) void {
+    var now: ListShown = .{ .tab = tab, .page = page, .pages = pages, .rows = @splat(.{}) };
+    for (rows, 0..) |row, r| now.rows[r] = .of(row);
 
     const full = switch (shown) {
-        .list => |old| old.kind != kind or old.page != page or old.pages != now.pages,
+        .list => |old| old.tab != tab or old.page != page or old.pages != now.pages,
         else => true,
     };
     if (full) {
         lcd.fill(0, 0, lcd.width, lcd.height, bg);
-        draw_tab(.light, kind == .light, "LIGHTS");
-        draw_tab(.group, kind == .group, "ROOMS");
+        for (std.enums.values(Tab)) |t| draw_tab(t, t == tab);
         if (now.pages > 1) draw_footer(page, now.pages);
-        if (entries.len == 0) text_centered(row_rect(2), "NOTHING HERE", 2, dim_text, bg);
+        if (rows.len == 0) text_centered(row_rect(2), "NOTHING HERE", 2, dim_text, bg);
     }
     for (now.rows, 0..) |row, r| {
         if (!full and std.meta.eql(row, shown.list.rows[r])) continue;
@@ -167,11 +209,11 @@ pub fn render_list(kind: hue.Kind, page: u8, entries: []const catalog.Entry) voi
     shown = .{ .list = now };
 }
 
-fn draw_tab(kind: hue.Kind, active: bool, label: []const u8) void {
-    const r = tab_rect(kind);
+fn draw_tab(t: Tab, active: bool) void {
+    const r = tab_rect(t);
     const back = if (active) panel else bg;
     lcd.fill(r.x, r.y, r.w, r.h, back);
-    text_centered(r, label, 2, if (active) bright_text else dim_text, back);
+    text_centered(r, t.label(), 2, if (active) bright_text else dim_text, back);
     if (active) lcd.fill(r.x, r.y + r.h - 3, r.w, 3, to565(warm_white));
 }
 
@@ -181,17 +223,42 @@ fn draw_row(r: usize, row: RowShown) void {
     lcd.fill(rect.x + margin, rect.y + rect.h - 1, rect.w - 2 * margin, 1, panel); // separator
     if (!row.present) return;
 
-    // Swatch: filled with the colour when on, hollow when off.
+    // Swatch: filled with the colour when on, hollow when off, red when unreachable.
     const sx = 14;
     const sy = rect.y + 6;
     const size = 28;
-    if (row.on and row.reachable) {
-        lcd.fill(sx, sy, size, size, to565(row.colour));
-    } else {
-        lcd.fill(sx, sy, size, size, if (row.reachable) dim_text else warn_text);
-        lcd.fill(sx + 2, sy + 2, size - 4, size - 4, bg);
+    switch (row.swatch) {
+        .on => |c| lcd.fill(sx, sy, size, size, to565(c)),
+        .off, .unreachable_ => {
+            lcd.fill(sx, sy, size, size, if (row.swatch == .off) dim_text else warn_text);
+            lcd.fill(sx + 2, sy + 2, size - 4, size - 4, bg);
+        },
+        .scene => |recalled| draw_play(sx, sy, size, if (recalled) to565(warm_white) else dim_text),
     }
-    text(swatch_hit_w, rect.y + 13, row.name_buf[0..row.name_len], 2, if (row.reachable) bright_text else warn_text, bg);
+    const name_colour = if (row.swatch == .unreachable_) warn_text else bright_text;
+    const name = row.name_buf[0..row.name_len];
+    // Names too long for the large font ("Hue color spot 1" ends in what tells it apart)
+    // drop to the small one, which fits 30 characters.
+    const avail = lcd.width - swatch_hit_w - 4;
+    const big = text_width(name, 2) <= avail;
+    if (row.sub_len == 0) {
+        if (big) text(swatch_hit_w, rect.y + 13, name, 2, name_colour, bg) else text(swatch_hit_w, rect.y + 16, name, 1, name_colour, bg);
+    } else {
+        if (big) text(swatch_hit_w, rect.y + 5, name, 2, name_colour, bg) else text(swatch_hit_w, rect.y + 9, name, 1, name_colour, bg);
+        text(swatch_hit_w, rect.y + 25, row.sub_buf[0..row.sub_len], 1, dim_text, bg);
+    }
+}
+
+/// A right-pointing triangle, one column at a time.
+fn draw_play(x: u16, y: u16, size: u16, c: lcd.Color) void {
+    const inset = 4;
+    const h = size - 2 * inset;
+    for (0..h / 2 + 1) |i| {
+        const col: u16 = @intCast(i * 2);
+        const half: u16 = @intCast(h / 2 - i);
+        // Two pixels wide per step, so the triangle is as wide as it is tall.
+        lcd.fill(x + inset + col, y + inset + (h / 2 - half), 2, 2 * half + 1, c);
+    }
 }
 
 fn draw_footer(page: u8, pages: u8) void {
@@ -245,7 +312,12 @@ pub fn render_settings(name: []const u8, light: hue.LightState) void {
     if (first or !std.mem.eql(u8, name, shown_name) or old.reachable != light.reachable) {
         lcd.fill(header.x, header.y, header.w, header.h, panel);
         text(14, 11, "<", 2, bright_text, panel);
-        text(back_button.w - 16, 14, name, 2, if (light.reachable) bright_text else warn_text, panel);
+        const name_x = back_button.w - 16;
+        const name_colour = if (light.reachable) bright_text else warn_text;
+        if (text_width(name, 2) <= lcd.width - name_x - 4)
+            text(name_x, 14, name, 2, name_colour, panel)
+        else
+            text(name_x, 15, name, 1, name_colour, panel);
         const n = @min(name.len, shown_name_buf.len);
         @memcpy(shown_name_buf[0..n], name[0..n]);
         shown_name = shown_name_buf[0..n];
@@ -315,9 +387,8 @@ const cell_h = font.height + 1;
 
 fn text_width(s: []const u8, scale: u16) u16 {
     var n: u16 = 0;
-    for (s) |c| if (!is_continuation(c)) {
-        n += 1;
-    };
+    var it: font.Chars = .{ .s = s };
+    while (it.next()) |_| n += 1;
     return if (n == 0) 0 else n * cell_w * scale - scale;
 }
 
@@ -327,20 +398,16 @@ fn text_centered(r: Rect, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Co
     text(r.x + (r.w - w) / 2, r.y + (r.h -| h) / 2, s, scale, fg, back);
 }
 
-/// Draws `s` at (x, y), clipped at the right edge. Lowercase renders as uppercase; each
-/// non-ASCII UTF-8 character renders as one box.
+/// Draws UTF-8 `s` at (x, y), clipped at the right edge. Lowercase renders as uppercase,
+/// accented letters as their base letter, other non-ASCII characters as a box.
 fn text(x: u16, y: u16, s: []const u8, scale: u16, fg: lcd.Color, back: lcd.Color) void {
     var cx = x;
-    for (s) |c| {
-        if (is_continuation(c)) continue;
+    var it: font.Chars = .{ .s = s };
+    while (it.next()) |c| {
         if (cx + cell_w * scale > lcd.width) return;
         glyph(cx, y, font.glyph(c), scale, fg, back);
         cx += cell_w * scale;
     }
-}
-
-fn is_continuation(c: u8) bool {
-    return c & 0xC0 == 0x80;
 }
 
 fn glyph(x: u16, y: u16, g: font.Glyph, scale: u16, fg: lcd.Color, back: lcd.Color) void {
