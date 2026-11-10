@@ -1,0 +1,76 @@
+name: Build and simulate
+
+# Builds every sample against its pinned MicroZig fork commit and runs it in Wokwi.
+# Each sample prints a line that proves it works (most end with `<name> test: PASS`).
+# Simulation needs the WOKWI_CLI_TOKEN secret (https://wokwi.com/dashboard/ci); without it,
+# the samples are only built.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sample:
+    name: ${{ matrix.sample }}
+    runs-on: ubuntu-latest
+    env:
+      WOKWI_CLI_TOKEN: ${{ secrets.WOKWI_CLI_TOKEN }}
+    strategy:
+      fail-fast: false
+      # Wokwi refuses connections when many simulations start at once.
+      max-parallel: 2
+      matrix:
+        include:
+          - sample: blinky
+            # Logs go to USB-Serial-JTAG, which wokwi-cli doesn't show: build only.
+            expect: ""
+          - sample: boot
+            timeout: 20000
+            expect: "boot test: PASS"
+          - sample: nvs
+            timeout: 60000
+            expect: "nvs test: PASS"
+          - sample: oled
+            timeout: 10000
+            expect: "frame 50:"
+          - sample: rmt
+            timeout: 30000
+            expect: "rmt test: PASS"
+          - sample: weblight
+            timeout: 60000
+            expect: "open http://"
+          - sample: hue
+            # The Hue bridge is on a LAN Wokwi's cloud can't reach: check that Wi-Fi is up.
+            timeout: 60000
+            expect: "(net) got address"
+          - sample: wifinvs
+            timeout: 90000
+            expect: "wifinvs test: PASS"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Build
+        working-directory: ${{ matrix.sample }}
+        # The first build after fetching MicroZig sometimes stops in regz; a second run works.
+        run: zig build -Doptimize=ReleaseSmall || zig build -Doptimize=ReleaseSmall
+
+      - name: Install wokwi-cli
+        if: matrix.expect != '' && env.WOKWI_CLI_TOKEN != ''
+        run: |
+          curl -L https://wokwi.com/ci/install.sh | sh
+          echo "$HOME/.wokwi/bin" >> "$GITHUB_PATH"
+
+      - name: Simulate
+        if: matrix.expect != '' && env.WOKWI_CLI_TOKEN != ''
+        run: bash .github/scripts/wokwi-run.sh "${{ matrix.sample }}" "${{ matrix.timeout }}" "${{ matrix.expect }}"

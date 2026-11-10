@@ -47,6 +47,12 @@ https://wokwi.com/dashboard/ci in `WOKWI_CLI_TOKEN`, e.g.
 `wokwi-cli --timeout 20000 --screenshot-part lcd1 --screenshot-time 19000 hue`. It simulates
 in Wokwi's cloud, so it can't reach devices on your network (the Hue bridge).
 
+CI: `.github/workflows/wokwi.yml` builds every sample on each push and pull request, and runs
+each one in Wokwi until it prints its success line (`<name> test: PASS` for the test samples).
+`blinky` is build-only (its log goes to USB-Serial-JTAG). Simulation needs a
+`WOKWI_CLI_TOKEN` repository secret; without it the workflow only builds. Run the same check
+locally with `.github/scripts/wokwi-run.sh <sample> <timeout ms> "<expected text>"`.
+
 ## MicroZig fork
 
 Upstream MicroZig doesn't support the ESP32-C6 yet. These examples build against the
