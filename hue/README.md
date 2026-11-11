@@ -12,20 +12,27 @@ HTTPS-only, and there is no TLS stack in the firmware.
    username (deleted in the Hue app), the board forgets it and pairs again.
 3. **Lists** every light, room, zone and scene in the log.
 4. **Control:**
-   - Touch screen (default, see below), two pages:
-     - **List**: `LIGHTS | ROOMS | SCENES` tabs, six rows a page with `< 1/2 >` paging.
-       On lights and rooms, tap a row's swatch to toggle it, its name to open its
-       settings. On scenes (each with its room below its name), tap a row to recall the
-       scene on that room; the last one recalled is highlighted, and the room's state is
-       re-read right away. The first row, `<  ROOM  >`, steps through ALL ROOMS and each
-       room with scenes; opening a room picks its scenes.
-     - **Settings**: `<` back, tap ON/OFF, drag the brightness bar or the colour strip,
-       tap WHITE. A room or zone is set through `/groups/<id>/action`, all its lights
-       at once.
+   - Touch screen (default, see below), rooms first:
+     - **Home**: `ROOMS | LIGHTS` tabs, five rows a page. A row's switch (left) turns it
+       on or off; the rest of the row (marked `>`) opens it. Page with `<` `>` or a swipe.
+     - **A room or a light**: a tile in its colour, at its brightness. Tap it: on/off.
+       Slide sideways on it: brightness (the whole tile's width is the range; sliding an
+       off room turns it on). Press and hold it, or tap COLOUR: the colour field (hue
+       across, white at the bottom). Let go to set; let go on the bottom strip to cancel.
+       A room also has SCENES (each in its own colours; tap one to recall it, the last
+       one recalled is marked) and LIGHTS (its lights, each opening its own page).
+     - `<`, or a swipe right (on a list's first page), goes back.
 
-     While you drag, the screen follows your finger and the bridge gets the latest value
-     at most every 150 ms (it handles about 10 commands/s per light), plus the final value
-     on release. The light or room last opened is saved, and the screen reopens on it.
+     Scenes that belong to no room (old app LightScenes) aren't on the screen.
+
+     Touches act on release: the row or button under the finger lights up, and sliding
+     off it cancels. Changes show at once and are sent right after; if the bridge doesn't
+     take one, the screen goes back and says NOT SENT. While sliding, the bridge gets the
+     latest value at most every 150 ms (it handles about 10 commands/s per light), plus
+     the final value on release. The light or room last opened is saved, and the screen
+     reopens on it.
+     - After 30 s without a touch the backlight dims; the touch that wakes it does
+       nothing else, so brushing past a remote on a wall doesn't switch the lights.
    - Web remote on port 80, on what's selected: on/off, a brightness slider, and a colour
      picker (hidden for white-only lights). `GET /state` returns JSON;
      `POST /set?on=1&bri=200&hue=8000&sat=254` applies any subset of the parameters.
@@ -33,7 +40,9 @@ HTTPS-only, and there is no TLS stack in the firmware.
      shows the status (blue = starting or searching, orange = waiting for you, green =
      done, red = error), then mirrors the selected light or room.
    - What's on screen is refreshed every 5 s and on every page change, so changes made
-     from the Hue app show up.
+     from the Hue app show up (not in the 1.5 s after a change, when the bridge still
+     reports the old state). Two failed refreshes in a row show BRIDGE OFFLINE along the
+     bottom, over a page that stays usable, until one works.
 
    Everything runs in one loop: `netconn_accept` with a 20 ms timeout doubles as the
    touch polling tick, so there is no second task and no locking.
@@ -43,8 +52,10 @@ panics. What can pass (no bridge yet, bridge not answering) is retried every 10 
 needs you (a `-Dhue_user` the bridge rejects, an unknown `-Dhue_light`) stays on screen
 until you rebuild.
 
-**Starting over:** hold the BOOT button for 3 s (or `curl -X POST http://<board>/forget`).
-The board forgets the bridge, the username and the selection, and restarts.
+**The BOOT button:** a short press turns every light off. Held 3 s, the screen asks
+FORGET / CANCEL; held 10 s (or with no touch screen, in the field UI, or while the board is
+still looking for the bridge), or `curl -X POST http://<board>/forget`, it doesn't ask. The
+board forgets the bridge, the username and the selection, and restarts.
 
 ## Experimental: the field UI (`-Dui=field`)
 
@@ -55,7 +66,8 @@ its own colour, at its own brightness, with its name and level in large type.
 - **Drag** up or down: brightness. The screen dims with you, and the bridge follows.
 - **Tap:** on or off.
 - **Press and hold:** the screen turns into a colour field (hue across, saturation down,
-  white at the bottom). Slide to a colour and let go to set it.
+  white at the bottom). Slide to a colour and let go to set it, or let go on the bottom
+  strip to cancel.
 - **Swipe up from the bottom edge** (where the dots and `^ SCENES` are): the room's scenes,
   each a full-width band painted in the scene's own colours (the average of what it sets
   its lights to, read from `/scenes/<id>` one scene per tick and cached). Tap a band to
@@ -85,11 +97,13 @@ A 2.8" ILI9341 240x320 SPI TFT with an FT6206/FT6236 capacitive touch controller
 | SCK       | GPIO19   | | SDA    | GPIO22   |
 | MOSI      | GPIO18   | | SCL    | GPIO23   |
 | CS        | GPIO20   | | VCC    | 3V3      |
-| D/C       | GPIO21   | | LED    | 3V3      |
+| D/C       | GPIO21   | | LED    | GPIO3    |
 | RST       | GPIO2    | | GND    | GND      |
 
 MISO and the touch INT pin stay unconnected. The screen takes SPI2, the C6's only
-general-purpose SPI; the LED is on RMT. If touches land mirrored on a real panel, flip the
+general-purpose SPI; the on-board LED is on RMT, the backlight on LEDC PWM. A breakout whose
+LED pin drives the backlight through a transistor (Adafruit's does) is fine on a GPIO; on a
+bare panel, put one in. If touches land mirrored on a real panel, flip the
 axes in `src/ft6206.zig` `read`.
 
 ## Build

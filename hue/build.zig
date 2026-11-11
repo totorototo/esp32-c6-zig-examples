@@ -25,7 +25,8 @@ pub fn build(b: *std.Build) void {
     options.addOption(u8, "led_level", b.option(u8, "led_level", "On-board LED level 1..255 (default: 40)") orelse 40);
     // Touch screen (ILI9341 + FT6206) on SPI2; the LED is on RMT, so both work.
     options.addOption(bool, "screen", b.option(bool, "screen", "ILI9341 + FT6206 touch screen (default: true)") orelse true);
-    // The touch UI: lists and a settings page, or the gesture-only experiment (src/field.zig).
+    // The touch UI: rooms and lights with a page each (src/screen.zig), or the gesture-only
+    // experiment (src/field.zig).
     options.addOption(Ui, "ui", b.option(Ui, "ui", "Touch UI: list (default) or field (experimental, gestures only)") orelse .list);
     // Made-up rooms instead of Wi-Fi and a bridge, to look at the UI in a simulator. The
     // field UI also plays its gestures by itself.

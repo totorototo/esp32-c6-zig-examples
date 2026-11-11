@@ -58,6 +58,8 @@ pub const Group = struct {
     name: []const u8,
     /// "Room", "Zone", "LightGroup", "Entertainment", ...
     type: []const u8 = "",
+    /// Light ids.
+    lights: []const []const u8 = &.{},
     state: struct { any_on: bool = false, all_on: bool = false } = .{},
     action: struct { bri: ?u8 = null, hue: ?u16 = null, sat: ?u8 = null } = .{},
 

@@ -7,8 +7,9 @@ const hue = @import("hue.zig");
 
 const log = std.log.scoped(.catalog);
 
-/// Per kind. Six rows per screen page, so four pages.
+/// Per kind.
 pub const max_entries = 24;
+pub const max_members = 16;
 
 pub const Entry = struct {
     kind: hue.Kind,
@@ -18,9 +19,26 @@ pub const Entry = struct {
     name_buf: [32]u8 = undefined,
     name_len: u8 = 0,
     state: hue.LightState,
+    /// A room or zone's lights, by id (the bridge's light ids are numbers).
+    members: [max_members]u16 = undefined,
+    member_len: u8 = 0,
 
     pub fn id(e: *const Entry) []const u8 {
         return e.id_buf[0..e.id_len];
+    }
+
+    pub fn has_member(e: *const Entry, light: *const Entry) bool {
+        const n = std.fmt.parseInt(u16, light.id(), 10) catch return false;
+        return std.mem.indexOfScalar(u16, e.members[0..e.member_len], n) != null;
+    }
+
+    pub fn set_members(e: *Entry, ids: []const []const u8) void {
+        e.member_len = 0;
+        for (ids) |s| {
+            if (e.member_len == max_members) break;
+            e.members[e.member_len] = std.fmt.parseInt(u16, s, 10) catch continue;
+            e.member_len += 1;
+        }
     }
 
     pub fn name(e: *const Entry) []const u8 {
@@ -122,6 +140,7 @@ pub fn refresh(ctx: Context, kind: hue.Kind) !void {
                 const g = kv.value_ptr.*;
                 if (!std.mem.eql(u8, g.type, "Room") and !std.mem.eql(u8, g.type, "Zone")) continue;
                 add(fresh, .group, kv.key_ptr.*, g.name, g.as_light().state);
+                if (fresh.len > 0) fresh.items[fresh.len - 1].set_members(g.lights);
             }
         },
     }
@@ -142,7 +161,7 @@ pub fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.L
     l.len += 1;
 }
 
-/// Re-reads one entry, e.g. the one on the settings page.
+/// Re-reads one entry, e.g. the one open on the screen.
 pub fn refresh_entry(ctx: Context, e: *Entry) !void {
     if (offline) return;
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
@@ -152,13 +171,14 @@ pub fn refresh_entry(ctx: Context, e: *Entry) !void {
     e.set_name(fresh.name);
 }
 
-/// Sends `change` and, when the bridge accepts it, updates the local copy.
-pub fn apply(ctx: Context, e: *Entry, change: hue.Change) void {
+/// Sends `change` and, when the bridge accepts it, updates the local copy. False when it
+/// didn't go through.
+pub fn apply(ctx: Context, e: *Entry, change: hue.Change) bool {
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     if (!offline) hue.set_state(arena.allocator(), ctx.bridge, ctx.user, e.target(), change) catch |err| {
         log.err("set {t} {s} failed: {t}", .{ e.kind, e.id(), err });
-        return;
+        return false;
     };
     if (change.on) |v| e.state.on = v;
     if (change.bri) |v| e.state.bri = v;
@@ -167,12 +187,27 @@ pub fn apply(ctx: Context, e: *Entry, change: hue.Change) void {
     log.info("{t} {s} `{s}` -> {s}, bri {?}, hue {?}, sat {?}", .{
         e.kind, e.id(), e.name(), if (e.state.on) "on" else "off", e.state.bri, e.state.hue, e.state.sat,
     });
+    return true;
+}
+
+/// Turns every light off (group 0 is all of them). False when it didn't go through.
+pub fn all_off(ctx: Context) bool {
+    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
+    defer arena.deinit();
+    if (!offline) hue.set_state(arena.allocator(), ctx.bridge, ctx.user, .{ .kind = .group, .id = "0" }, .{ .on = false }) catch |err| {
+        log.err("all off failed: {t}", .{err});
+        return false;
+    };
+    for ([_]*List{ &lights, &groups }) |l| for (l.slice()) |*e| {
+        e.state.on = false;
+    };
+    log.info("all lights off", .{});
+    return true;
 }
 
 // ---- scenes ----
 
-/// Eight pages of six.
-/// Sixteen pages of six. A bridge has about ten per room, from the app's gallery.
+/// A bridge has about ten per room, from the app's gallery.
 pub const max_scenes = 96;
 
 pub const Scene = struct {
@@ -292,13 +327,13 @@ fn scene_less(_: void, a: Scene, b: Scene) bool {
     return std.ascii.lessThanIgnoreCase(a.name(), b.name());
 }
 
-/// Recalls `sc` on its room. The lights' new states show up with the next refresh.
-pub fn recall(ctx: Context, sc: *const Scene) void {
+/// Recalls `sc` on its room, then re-reads the room. False when it didn't go through.
+pub fn recall(ctx: Context, sc: *const Scene) bool {
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     if (!offline) hue.recall_scene(arena.allocator(), ctx.bridge, ctx.user, sc.group(), sc.id()) catch |err| {
         log.err("recall scene {s} failed: {t}", .{ sc.id(), err });
-        return;
+        return false;
     };
     recalled_len = sc.id_len;
     @memcpy(recalled_buf[0..recalled_len], sc.id());
@@ -319,6 +354,12 @@ pub fn recall(ctx: Context, sc: *const Scene) void {
     const room = groups.find(sc.group());
     if (room) |g| refresh_entry(ctx, g) catch |err| log.warn("room not re-read: {t}", .{err});
     if (selected()) |e| if (e != room) refresh_entry(ctx, e) catch |err| log.warn("selection not re-read: {t}", .{err});
+    return true;
+}
+
+pub fn find_scene(id: []const u8) ?*Scene {
+    for (scenes.slice()) |*sc| if (std.mem.eql(u8, sc.id(), id)) return sc;
+    return null;
 }
 
 pub fn log_all() void {

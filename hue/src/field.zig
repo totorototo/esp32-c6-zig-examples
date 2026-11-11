@@ -5,7 +5,8 @@
 //!   drag up / down       brightness; the screen dims with you
 //!   tap                  on / off
 //!   press and hold       the whole screen becomes a colour field (hue across, saturation
-//!                        down); slide to a colour, let go to set it
+//!                        down); slide to a colour, let go to set it (on the bottom strip:
+//!                        cancel)
 //!   swipe up from the    the room's scenes, each a full-width band in the scene's own
 //!   bottom edge          colours; tap one to recall it, swipe to page, down to close
 //!
@@ -19,12 +20,22 @@ const ui = @import("ui.zig");
 const lcd = @import("screen").lcd;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
+const colourfield = @import("colourfield.zig");
+const backlight = @import("backlight.zig");
 const Point = ft6206.Point;
 
 const log = std.log.scoped(.field);
 
 pub var touch_ok = false;
 var refresh_wanted = false;
+
+/// No buttons to confirm with: BOOT held long enough forgets straight away (main.zig).
+pub const can_confirm = false;
+pub fn ask_forget() void {}
+pub fn take_forget() bool {
+    return false;
+}
+pub fn report_refresh(_: bool) void {}
 
 const Mode = enum { room, colour, scenes };
 var mode: Mode = .room;
@@ -142,6 +153,8 @@ const Gesture = struct {
     last: Point = .{ .x = 0, .y = 0 },
     misses: u8 = 0,
     start_bri: i32 = 0,
+    /// The touch woke the backlight: ignored.
+    swallow: bool = false,
 };
 var gesture: Gesture = .{};
 
@@ -156,11 +169,13 @@ fn poll(ctx: catalog.Context, t: u64) void {
     if (point) |p| {
         gesture.misses = 0;
         if (!gesture.down) {
-            gesture = .{ .down = true, .start = p, .start_t = t, .last = p };
+            gesture = .{ .down = true, .start = p, .start_t = t, .last = p, .swallow = !config.demo and backlight.wake(t) };
             gesture.start_bri = if (e.state.on) e.state.bri orelse 254 else 0;
             return;
         }
+        if (!config.demo) _ = backlight.wake(t);
         gesture.last = p;
+        if (gesture.swallow) return;
         const dx = @as(i32, p.x) - gesture.start.x;
         const dy = @as(i32, p.y) - gesture.start.y;
         if (mode == .scenes) return; // the sheet acts on release
@@ -177,7 +192,8 @@ fn poll(ctx: catalog.Context, t: u64) void {
                 } else if (t - gesture.start_t >= hold_ms and @abs(dx) < still_px and @abs(dy) < still_px and e.state.hue != null) {
                     gesture.kind = .hold;
                     mode = .colour;
-                    pending = colour_at(p);
+                    colourfield.reset();
+                    pending = colourfield.colour_at(p);
                 }
             },
             .dim => {
@@ -185,7 +201,7 @@ fn poll(ctx: catalog.Context, t: u64) void {
                 const bri = std.math.clamp(gesture.start_bri - @divTrunc(dy * 254, dim_span_px), 1, 254);
                 pending = .{ .on = true, .bri = @intCast(bri) };
             },
-            .hold => pending = colour_at(p),
+            .hold => pending = if (colourfield.on_strip(p)) null else colourfield.colour_at(p),
             .swipe, .edge => {},
         }
     } else if (gesture.down) {
@@ -195,12 +211,16 @@ fn poll(ctx: catalog.Context, t: u64) void {
 
     // While dimming, the bridge follows at most every `send_ms`; colour is sent on release.
     if (gesture.kind == .dim) if (pending) |c| if (t - last_send >= send_ms) {
-        catalog.apply(ctx, e, c);
+        _ = catalog.apply(ctx, e, c);
         last_send = t;
     };
 }
 
 fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
+    if (gesture.swallow) {
+        gesture = .{};
+        return;
+    }
     const dx = @as(i32, gesture.last.x) - gesture.start.x;
     const dy = @as(i32, gesture.last.y) - gesture.start.y;
     if (mode == .scenes and gesture.kind != .edge) {
@@ -210,10 +230,13 @@ fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
     }
     switch (gesture.kind) {
         .undecided => if (t - gesture.start_t < tap_ms + 3 * 20) {
-            catalog.apply(ctx, e, .{ .on = !e.state.on });
+            _ = catalog.apply(ctx, e, .{ .on = !e.state.on });
         },
         .swipe => step(dx < 0),
-        .dim, .hold => if (pending) |c| catalog.apply(ctx, e, c),
+        // Let go on the colour field's strip: `pending` is null, nothing changes.
+        .dim, .hold => if (pending) |c| {
+            _ = catalog.apply(ctx, e, c);
+        },
         .edge => {
             gesture = .{};
             return; // the sheet stays open
@@ -239,7 +262,7 @@ fn sheet_release(ctx: catalog.Context, dy: i32) void {
     if (y >= sheet_header_h) {
         const band = (y - sheet_header_h) / band_h;
         const on_page = sheet_scenes();
-        if (band < on_page.len) catalog.recall(ctx, &catalog.scenes.items[on_page[band]]);
+        if (band < on_page.len) _ = catalog.recall(ctx, &catalog.scenes.items[on_page[band]]);
     }
     mode = .room;
 }
@@ -260,14 +283,12 @@ const RoomShown = struct {
     has_scenes: bool = false,
 };
 var shown: ?RoomShown = null;
-/// Rows of the colour field drawn so far: it's drawn a slice per tick, so touch keeps
-/// being read while it fills in.
-var field_rows: u16 = 0;
-const rows_per_tick = 30;
 
 fn render() void {
-    if (mode == .colour) return render_colour();
-    field_rows = 0;
+    if (mode == .colour) {
+        shown = null; // the room view repaints in full afterwards
+        return colourfield.render(gesture.last);
+    }
     if (mode == .scenes) return render_sheet();
     sheet_shown = null;
     const e = current() orelse return;
@@ -434,103 +455,6 @@ fn bg_of(s: hue.LightState, base_override: ?ui.Rgb) ui.Rgb {
 fn fg_on(bg: ui.Rgb) ui.Rgb {
     const luma = (@as(u32, bg.r) * 299 + @as(u32, bg.g) * 587 + @as(u32, bg.b) * 114) / 1000;
     return if (luma > 140) .{ .r = 16, .g = 16, .b = 16 } else .{ .r = 245, .g = 245, .b = 245 };
-}
-
-// ---- drawing: the colour field ----
-
-const field_h = 300; // below it, a strip with the instruction
-var hue_row: [lcd.width]ui.Rgb = undefined;
-var cursor: ?Point = null;
-
-fn colour_at(p: Point) hue.Change {
-    const x = @min(p.x, lcd.width - 1);
-    const y = @min(p.y, field_h - 1);
-    return .{
-        .on = true,
-        .hue = @intCast(@as(u32, x) * 65535 / (lcd.width - 1)),
-        .sat = @intCast(254 - @as(u32, y) * 254 / (field_h - 1)),
-    };
-}
-
-/// Hue across, saturation down: vivid at the top, white at the bottom.
-fn field_pixel(x: u16, y: u16) lcd.Color {
-    return blend(hue_row[x], row_sat(y));
-}
-
-/// Saturation of row `y` as 0..256, for shifts instead of divisions.
-fn row_sat(y: u16) u32 {
-    return 256 - @as(u32, y) * 256 / (field_h - 1);
-}
-
-fn blend(c: ui.Rgb, s: u32) lcd.Color {
-    return lcd.rgb(
-        @intCast(255 - ((255 - @as(u32, c.r)) * s >> 8)),
-        @intCast(255 - ((255 - @as(u32, c.g)) * s >> 8)),
-        @intCast(255 - ((255 - @as(u32, c.b)) * s >> 8)),
-    );
-}
-
-fn render_colour() void {
-    if (field_rows < field_h) {
-        if (field_rows == 0) {
-            // The instruction first, so it shows the moment the hold registers.
-            const black = lcd.rgb(0, 0, 0);
-            lcd.fill(0, field_h, lcd.width, lcd.height - field_h, black);
-            ui.text_centered(.{ .x = 0, .y = field_h, .w = lcd.width, .h = lcd.height - field_h }, "SLIDE, LET GO TO SET", 1, lcd.rgb(240, 240, 240), black);
-            for (&hue_row, 0..) |*c, x| c.* = ui.hsv_to_rgb(@intCast(x * 65535 / (lcd.width - 1)), 254);
-            shown = null; // the room view repaints in full afterwards
-            cursor = null;
-        }
-        const n = @min(rows_per_tick, field_h - field_rows);
-        var row: [lcd.width * 2]u8 = undefined;
-        lcd.begin(0, field_rows, lcd.width, n);
-        for (field_rows..field_rows + n) |y| {
-            const sat = row_sat(@intCast(y));
-            for (hue_row, 0..) |c, x| lcd.put(&row, x, blend(c, sat));
-            lcd.pixels(&row);
-        }
-        lcd.end();
-        field_rows += n;
-        if (field_rows < field_h) return;
-    }
-    const p = gesture.last;
-    const at: Point = .{ .x = @min(p.x, lcd.width - 1), .y = @min(p.y, field_h - 1) };
-    if (cursor) |old| {
-        if (old.x == at.x and old.y == at.y) return;
-        draw_cursor(old, false);
-    }
-    draw_cursor(at, true);
-    cursor = at;
-}
-
-const ring = 9; // radius of the cursor's outer edge
-
-/// A white ring with a dark edge, or (`on` false) the field it covers, restored.
-fn draw_cursor(c: Point, on: bool) void {
-    const x0 = c.x -| ring;
-    const y0 = c.y -| ring;
-    const x1 = @min(c.x + ring + 1, lcd.width);
-    const y1 = @min(c.y + ring + 1, field_h);
-    var row: [(2 * ring + 1) * 2]u8 = undefined;
-    lcd.begin(x0, y0, x1 - x0, y1 - y0);
-    defer lcd.end();
-    for (y0..y1) |y| {
-        for (x0..x1, 0..) |x, i| {
-            const dx = @as(i32, @intCast(x)) - c.x;
-            const dy = @as(i32, @intCast(y)) - c.y;
-            const d2 = dx * dx + dy * dy;
-            const px = if (!on) field_pixel(@intCast(x), @intCast(y)) else if (d2 <= 3 * 3)
-                field_pixel(@intCast(x), @intCast(y))
-            else if (d2 <= 6 * 6)
-                lcd.rgb(255, 255, 255)
-            else if (d2 <= ring * ring)
-                lcd.rgb(20, 20, 20)
-            else
-                field_pixel(@intCast(x), @intCast(y));
-            lcd.put(&row, i, px);
-        }
-        lcd.pixels(row[0 .. 2 * (x1 - x0)]);
-    }
 }
 
 // ---- touch input: the panel, or a scripted demo ----

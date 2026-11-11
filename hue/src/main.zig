@@ -5,14 +5,15 @@
 //!   2. Gets a username: `-Dhue_user`, else the one saved in flash, else pairing (press the
 //!      bridge's link button). A paired username is saved, so pairing happens once.
 //!   3. Logs the lights, rooms, zones and scenes, then controls them:
-//!      - Touch screen (ILI9341 + FT6206, `-Dscreen=true`, the default): lights, rooms and
-//!        scenes, and a settings page for the light or room picked (on/off, brightness,
-//!        colour). It reopens on the last one picked (or `-Dhue_light`).
+//!      - Touch screen (ILI9341 + FT6206, `-Dscreen=true`, the default): rooms first, each
+//!        with its brightness, colour, scenes and lights (screen.zig), and every light. It
+//!        reopens on the last one open (or `-Dhue_light`), and dims when left alone.
 //!      - Web remote on port 80, on the selected entry: on/off, brightness, colour.
 //!      - The on-board LED (RMT, GPIO8) shows the status, then mirrors the selected entry.
 //!      What's on screen is refreshed every 5 s.
-//!   Holding the BOOT button for 3 s (or `POST /forget`) forgets the bridge and the username
-//!   and restarts.
+//!   The BOOT button: a short press turns every light off. Held 3 s, the screen asks
+//!   whether to forget the bridge and the username (held 10 s, or `POST /forget`, it just
+//!   does), then restarts.
 //! Logs go to UART0 (115200 baud).
 const std = @import("std");
 const microzig = @import("microzig");
@@ -22,7 +23,7 @@ const hue = @import("hue.zig");
 const web = net.web;
 const ui = @import("ui.zig");
 const catalog = @import("catalog.zig");
-/// The touch UI: lists and a settings page (`-Dui=list`), or the gesture-only experiment
+/// The touch UI: rooms and lights with a page each (`-Dui=list`), or the gesture-only experiment
 /// (`-Dui=field`). Both have the same interface.
 const screen = switch (config.ui) {
     .list => @import("screen.zig"),
@@ -31,6 +32,7 @@ const screen = switch (config.ui) {
 const ili9341 = @import("screen").lcd;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
+const backlight = @import("backlight.zig");
 const lwip = net.lwip;
 
 const hal = microzig.hal;
@@ -92,7 +94,8 @@ const poll_ms = 20;
 const refresh_ms = 5000;
 
 // Touch screen wiring. GPIO22/23 match the OLED demo; none of these are strapping, JTAG or
-// USB pins. MISO and the touch INT pin stay unconnected; the backlight goes to 3V3.
+// USB pins. MISO and the touch INT pin stay unconnected; the backlight (LED) is on GPIO3,
+// dimmed by PWM (backlight.zig).
 const screen_pins: ili9341.Pins = .{
     .sck = gpio.num(19),
     .mosi = gpio.num(18),
@@ -110,10 +113,15 @@ const rmt_config: rmt.Config = .{ .clock_config = hal.clock_config };
 const led_channel_config: rmt.Tx.Config = .{};
 var led: WS2812 = undefined;
 
-/// The BOOT button: low while pressed (pulled up on the board). Held 3 s, it forgets the
-/// saved bridge and username.
+/// The BOOT button: low while pressed (pulled up on the board). A short press turns all
+/// lights off; held, it forgets the saved bridge and username.
 const boot_button = gpio.num(9);
-const forget_hold_ms = 3000;
+/// Released before this: all off.
+const short_press_ms = 800;
+/// Held this long: the screen asks (FORGET / CANCEL).
+const ask_hold_ms = 3000;
+/// Held this long: forgotten without asking (no screen, the field UI, or before the UI runs).
+const forget_hold_ms = 10_000;
 
 var heap: microzig.Allocator = undefined;
 
@@ -123,6 +131,7 @@ pub fn main() !void {
     std.log.info("hue on ESP32-C6", .{});
     init_led();
     if (config.screen) {
+        backlight.init();
         ili9341.init(screen_pins);
         if (ft6206.init(touch_sda, touch_scl)) {
             screen.touch_ok = true;
@@ -330,8 +339,19 @@ fn demo() noreturn {
         .{ "83", "Séjour", .{ .on = true, .bri = 40, .hue = 1000, .sat = 254 } },
     };
     for (rooms) |r| catalog.add(&catalog.groups, .group, r[0], r[1], r[2]);
-    catalog.add(&catalog.lights, .light, "2", "Hue color spot 1", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 });
-    catalog.add(&catalog.lights, .light, "3", "Étoile", .{ .on = false, .bri = 120 });
+    const lights = [_]struct { []const u8, []const u8, hue.LightState }{
+        .{ "2", "Hue color spot 1", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 } },
+        .{ "4", "Hue color spot 2", .{ .on = true, .bri = 200, .hue = 7000, .sat = 160 } },
+        .{ "6", "Lampadaire", .{ .on = false, .bri = 120 } },
+        .{ "3", "Étoile", .{ .on = false, .bri = 120 } },
+        .{ "7", "Bureau", .{ .on = true, .bri = 110, .hue = 46000, .sat = 200 } },
+        .{ "8", "Veilleuse", .{ .on = false, .bri = 90, .hue = 56000, .sat = 230 } },
+        .{ "9", "Prise café", .{ .on = false, .reachable = false } },
+    };
+    for (lights) |l| catalog.add(&catalog.lights, .light, l[0], l[1], l[2]);
+    catalog.groups.items[0].set_members(&.{ "2", "4", "6", "9" }); // Salon
+    catalog.groups.items[1].set_members(&.{"7"}); // Bureau
+    catalog.groups.items[2].set_members(&.{ "3", "8" }); // Chambre
     const scenes = [_]struct { []const u8, []const u8, []const u8, @import("screen").Rgb, u8 }{
         .{ "s1", "Détente", "1", .{ .r = 255, .g = 160, .b = 80 }, 150 },
         .{ "s2", "Lecture", "1", .{ .r = 255, .g = 225, .b = 180 }, 254 },
@@ -351,7 +371,11 @@ fn demo() noreturn {
     const ctx: catalog.Context = .{ .bridge = hue.Bridge.from_octets(.{ 0, 0, 0, 0 }), .user = "", .allocator = heap.allocator() };
     var mirrored: ?hue.LightState = null;
     while (true) {
-        if (config.screen) screen.tick(ctx, now_ms());
+        const t = now_ms();
+        if (config.screen) {
+            screen.tick(ctx, t);
+            if (!config.demo or config.ui == .list) backlight.tick(t);
+        }
         if (catalog.selected()) |e| {
             if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
             mirrored = e.state;
@@ -381,6 +405,7 @@ fn control(ctx: catalog.Context) !void {
     var last_refresh = now_ms();
     var mirrored: ?hue.LightState = null;
     var button_down_since: ?u64 = null;
+    var asked = false;
 
     while (true) {
         var client: ?*lwip.c.netconn = null;
@@ -397,7 +422,10 @@ fn control(ctx: catalog.Context) !void {
         }
 
         const t = now_ms();
-        if (config.screen) screen.tick(ctx, t);
+        if (config.screen) {
+            screen.tick(ctx, t);
+            backlight.tick(t);
+        }
 
         // Pick up changes made from the Hue app or a wall switch, and refresh whatever
         // the screen just navigated to.
@@ -409,7 +437,12 @@ fn control(ctx: catalog.Context) !void {
             const result = if (config.screen)
                 screen.refresh(ctx)
             else if (catalog.selected()) |e| catalog.refresh_entry(ctx, e);
-            result catch |err| std.log.warn("refresh failed: {t}", .{err});
+            if (result) |_| {
+                if (config.screen) screen.report_refresh(true);
+            } else |err| {
+                std.log.warn("refresh failed: {t}", .{err});
+                if (config.screen) screen.report_refresh(false);
+            }
         }
 
         if (catalog.selected()) |e| {
@@ -423,8 +456,19 @@ fn control(ctx: catalog.Context) !void {
         if (boot_button.read() == 0) {
             const since = button_down_since orelse t;
             button_down_since = since;
-            if (t - since >= forget_hold_ms) forget();
-        } else button_down_since = null;
+            if (config.screen) _ = backlight.wake(t);
+            const held = t - since;
+            if (held >= forget_hold_ms) forget();
+            if (held >= ask_hold_ms and !asked and config.screen and screen.can_confirm and screen.touch_ok) {
+                screen.ask_forget();
+                asked = true;
+            }
+        } else if (button_down_since) |since| {
+            if (t - since < short_press_ms) _ = catalog.all_off(ctx);
+            button_down_since = null;
+            asked = false;
+        }
+        if (config.screen and screen.take_forget()) forget();
     }
 }
 
@@ -452,7 +496,8 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
         const change = parse_change(req.query) catch
             return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
         const e = catalog.selected() orelse return no_selection(conn);
-        catalog.apply(ctx, e, change);
+        if (!catalog.apply(ctx, e, change))
+            return web.respond(conn, "502 Bad Gateway", "text/plain", "the bridge didn't take it\n");
         return respond_state(conn);
     }
     return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
