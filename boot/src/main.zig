@@ -82,16 +82,23 @@ fn expect(ok: bool, comptime what: []const u8) void {
     std.log.err("check failed: " ++ what, .{});
 }
 
+/// Reads memory for real. Plain reads can be answered at compile time: `rodata_table` is
+/// comptime-known, and LLVM turns a global nobody writes (`bss_zeroed`) into a constant, so
+/// the checks below would pass whatever the startup code did.
+fn read(comptime T: type, items: *const T) T {
+    return @as(*const volatile T, items).*;
+}
+
 pub fn main() !void {
     std.log.info("boot test on ESP32-C6, {s}", .{config.mode});
 
-    expect(std.mem.eql(u32, &data_words, &.{ 0x1234_5678, 0x9abc_def0, 0x0f1e_2d3c, 0x4b5a_6978 }), "initialised data");
+    expect(std.mem.eql(u32, &read([4]u32, &data_words), &.{ 0x1234_5678, 0x9abc_def0, 0x0f1e_2d3c, 0x4b5a_6978 }), "initialised data");
     var zero = true;
-    for (bss_zeroed) |w| zero = zero and w == 0;
+    for (read([64]u32, &bss_zeroed)) |w| zero = zero and w == 0;
     expect(zero, "zero-initialised data");
 
     var sum: u32 = 0;
-    for (rodata_table) |p| sum += p;
+    for (read(@TypeOf(rodata_table), &rodata_table)) |p| sum += p;
     expect(sum == 197, "read-only data");
 
     const ram_fn = in_ram();

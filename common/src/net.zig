@@ -1,6 +1,7 @@
 //! Wi-Fi station + lwIP bring-up, adapted from MicroZig's `tcp_server` example.
-//! `up()` returns once DHCP has assigned an address. Needs a `config` import with `ssid`
-//! and `password` (see common/build.zig).
+//! `up()` returns once DHCP has assigned an address, and leaves a task behind that
+//! reconnects whenever the connection drops. Needs a `config` import with `ssid` and
+//! `password` (see common/build.zig).
 const std = @import("std");
 const microzig = @import("microzig");
 const config = @import("config");
@@ -10,10 +11,51 @@ const rtos = hal.rtos;
 const radio = hal.radio;
 
 pub const exports = @import("lwip/exports.zig");
+const uart_log = @import("uart_log");
 pub const lwip = @import("lwip/include.zig");
 pub const web = @import("web.zig");
 
 const log = std.log.scoped(.net);
+
+// ---- the firmware root's options, the same for every Wi-Fi sample ----
+//
+//     pub const std_options = net.std_options(&.{});
+//     pub const microzig_options = net.microzig_options;
+
+/// Info level, the radio driver's chatter off, `extra_scopes` on top, logs to UART0. Also a
+/// page size: the HTTPS client's certificate-bundle lock wants an `std.Io`, and
+/// `std.Io.failing` references file memory maps, which need one (freestanding has none;
+/// it is never actually used). Harmless for samples without HTTPS.
+pub fn std_options(comptime extra_scopes: []const std.log.ScopeLevel) std.Options {
+    const quiet_radio = [_]std.log.ScopeLevel{
+        .{ .scope = .esp_radio, .level = .err },
+        .{ .scope = .esp_radio_timer, .level = .err },
+        .{ .scope = .esp_radio_wifi, .level = .err },
+        .{ .scope = .esp_radio_osi, .level = .err },
+    };
+    const scopes = quiet_radio ++ extra_scopes[0..extra_scopes.len].*;
+    var o = microzig.std_options(.{
+        .log_level = .info,
+        .log_scope_levels = &scopes,
+        .logFn = uart_log.log,
+    });
+    o.page_size_min = 4096;
+    o.page_size_max = 4096;
+    return o;
+}
+
+/// The RTOS and the radio on their interrupts, and received frames handed to lwIP.
+pub const microzig_options: microzig.Options = .{
+    .interrupts = .{
+        .interrupt30 = radio.interrupt_handler,
+        .interrupt31 = rtos.interrupt_handler,
+    },
+    .cpu = .{ .interrupt_stack = .{ .enable = true, .size = 8192 } },
+    .hal = .{
+        .rtos = .{ .enable = true },
+        .radio = .{ .wifi = .{ .on_packet_received = on_packet_received } },
+    },
+};
 
 var netif: lwip.c.netif = undefined;
 var netif_ready = false;
@@ -52,11 +94,56 @@ pub fn up(gpa: std.mem.Allocator) !void {
 
     log.info("connecting to `{s}`", .{config.ssid});
     try radio.wifi.connect();
-    while (radio.wifi.get_sta_state() != .connected) rtos.sleep(.from_ms(100));
+    join();
     _ = lwip.c.netifapi_netif_common(&netif, lwip.c.netif_set_link_up, null);
 
     ip_ready.wait();
     log.info("got address {f}", .{ip()});
+
+    _ = try rtos.spawn(gpa, supervise, .{}, .{ .name = "wifi_supervisor" });
+}
+
+/// Between connection attempts. The driver doesn't retry by itself: after a failed attempt
+/// or a lost connection the station stays `disconnected` until `connect` is called again.
+const retry_ms = 5000;
+
+/// Waits until the station is connected, asking the driver again every `retry_ms`. Never
+/// gives up: after a power cut the board may boot long before the access point.
+fn join() void {
+    var last_try = now_ms();
+    while (true) {
+        switch (radio.wifi.get_sta_state()) {
+            .connected => return,
+            .disconnected => if (now_ms() - last_try >= retry_ms) {
+                last_try = now_ms();
+                log.warn("not connected to `{s}`: retrying", .{config.ssid});
+                radio.wifi.connect() catch |err| log.warn("connect failed: {t}", .{err});
+            },
+            else => {},
+        }
+        rtos.sleep(.from_ms(100));
+    }
+}
+
+/// A task that reconnects when the access point goes away (reboot, out of range). The link
+/// goes down meanwhile, so lwIP stops sending, and back up afterwards, which makes DHCP
+/// confirm or renew the address.
+fn supervise() void {
+    while (true) {
+        rtos.sleep(.from_ms(500));
+        if (radio.wifi.get_sta_state() != .disconnected) continue;
+
+        log.warn("lost `{s}`: reconnecting", .{config.ssid});
+        _ = lwip.c.netifapi_netif_common(&netif, lwip.c.netif_set_link_down, null);
+        radio.wifi.connect() catch |err| log.warn("connect failed: {t}", .{err});
+        join();
+        _ = lwip.c.netifapi_netif_common(&netif, lwip.c.netif_set_link_up, null);
+        log.info("reconnected to `{s}`", .{config.ssid});
+    }
+}
+
+fn now_ms() u64 {
+    return microzig.hal.time.get_time_since_boot().to_us() / 1000;
 }
 
 pub fn ip() IpFormatter {
@@ -73,15 +160,12 @@ pub const IpFormatter = struct {
 
 /// Called from the Wi-Fi driver for every received frame; hands it to lwIP.
 pub fn on_packet_received(comptime _: radio.wifi.Interface, data: []const u8) void {
+    if (!netif_ready) return;
     const pbuf: *lwip.c.struct_pbuf = lwip.c.pbuf_alloc(lwip.c.PBUF_RAW, @intCast(data.len), lwip.c.PBUF_POOL) orelse {
         log.err("failed to allocate receive pbuf", .{});
         return;
     };
     lwip.c_err(lwip.c.pbuf_take(pbuf, data.ptr, @intCast(data.len))) catch unreachable;
-    if (!netif_ready) {
-        _ = lwip.c.pbuf_free(pbuf);
-        return;
-    }
     lwip.c_err(netif.input.?(pbuf, &netif)) catch |err| {
         _ = lwip.c.pbuf_free(pbuf);
         log.warn("tcpip_input failed: {t}", .{err});

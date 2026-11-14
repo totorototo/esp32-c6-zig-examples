@@ -96,9 +96,7 @@ pub fn main() !void {
         try settings.set_blob("blob", &blob);
         std.log.info("first boot: values stored, resetting", .{});
         time.sleep_ms(50); // let the UART drain
-        // CPU reset, not system reset: Wokwi ignores the C6 system reset. Either reboots
-        // through the ROM, which is all this test needs.
-        hal.rom.software_reset_cpu();
+        reset_chip();
     }
 
     // Second boot (or later, on hardware): everything must have survived the reset.
@@ -136,4 +134,14 @@ pub fn main() !void {
         std.log.err("nvs test: FAIL ({} checks failed)", .{failures});
     }
     while (true) {}
+}
+
+/// Reboots the whole chip (radio and peripherals too, like the reset button). Wokwi ignores
+/// the C6 system reset, so if the chip is still running a moment later, a CPU reset (which
+/// Wokwi does) takes over. On hardware the system reset always wins: a CPU-only reset would
+/// leave the radio and the other peripherals running into the next boot.
+fn reset_chip() noreturn {
+    microzig.chip.peripherals.LP_AON.SYS_CFG.modify(.{ .HPSYS_SW_RESET = 1 });
+    hal.rom.delay_us(10_000);
+    hal.rom.software_reset_cpu();
 }

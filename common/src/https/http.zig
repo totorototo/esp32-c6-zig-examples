@@ -14,6 +14,7 @@ pub const Error = error{BadResponse};
 
 /// Parses the head if `buf` holds all of it, else returns null (read more).
 pub fn parse_head(buf: []const u8) Error!?Head {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
     var lines = std.mem.splitSequence(u8, buf[0..end], "\r\n");
     const status_line = lines.next() orelse return error.BadResponse;
@@ -37,6 +38,7 @@ pub fn parse_head(buf: []const u8) Error!?Head {
 /// With the response read so far in `buf`, the body (chunked bodies decoded in place), or
 /// null while more bytes are needed. `at_eof`: the server closed the connection.
 pub fn body(buf: []u8, head: Head, at_eof: bool) Error!?[]u8 {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const raw = buf[head.body_start..];
     if (head.chunked) return dechunk(raw, at_eof);
     if (head.content_length) |n| {
@@ -52,6 +54,7 @@ pub fn body(buf: []u8, head: Head, at_eof: bool) Error!?[]u8 {
 /// again on the same buffer once more bytes arrive only if nothing was decoded: callers call
 /// it once per read, on the undecoded bytes, and a null result leaves `raw` untouched.
 fn dechunk(raw: []u8, at_eof: bool) Error!?[]u8 {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     // First pass: check the whole body is there, without modifying it.
     var in: usize = 0;
     while (true) {
@@ -59,7 +62,9 @@ fn dechunk(raw: []u8, at_eof: bool) Error!?[]u8 {
         const size = try chunk_size(raw[in..line_end]);
         in = line_end + 2;
         if (size == 0) break; // trailers, if any, are not needed
-        if (raw.len < in + size + 2) return incomplete(at_eof);
+        // Checked: a huge size would wrap `in + size + 2` past this test in ReleaseSmall.
+        const chunk_end = std.math.add(usize, in, size) catch return error.BadResponse;
+        if (raw.len < chunk_end or raw.len - chunk_end < 2) return incomplete(at_eof);
         if (!std.mem.eql(u8, raw[in + size ..][0..2], "\r\n")) return error.BadResponse;
         in += size + 2;
     }
@@ -78,6 +83,7 @@ fn dechunk(raw: []u8, at_eof: bool) Error!?[]u8 {
 }
 
 fn chunk_size(line: []const u8) Error!usize {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const hex = std.mem.trim(u8, line[0 .. std.mem.indexOfScalar(u8, line, ';') orelse line.len], " \t");
     if (hex.len == 0) return error.BadResponse;
     return std.fmt.parseInt(usize, hex, 16) catch error.BadResponse;
@@ -126,6 +132,12 @@ test "bad heads" {
     try testing.expectError(error.BadResponse, parse_head("SSH-2.0-OpenSSH\r\n\r\n"));
     try testing.expectError(error.BadResponse, parse_head("HTTP/1.1 2x0 OK\r\n\r\n"));
     var buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".*;
+    const head = (try parse_head(&buf)).?;
+    try testing.expectError(error.BadResponse, body(&buf, head, false));
+}
+
+test "chunk size that would overflow" {
+    var buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nab\r\n0\r\n\r\n".*;
     const head = (try parse_head(&buf)).?;
     try testing.expectError(error.BadResponse, body(&buf, head, false));
 }

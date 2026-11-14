@@ -4,7 +4,9 @@
 //!     key pairs) live in module-level statics instead of `init`'s stack frame. Unpatched,
 //!     the handshake needed about 180 KB of stack, which on the ESP32-C6 left too little
 //!     heap for Wi-Fi.
-//!   - Consequence: one handshake at a time (fine for a single-connection device).
+//!   - Consequence: one handshake at a time (fine for a single-connection device). The key
+//!     share's private keys are wiped when `init` returns: a static would otherwise keep
+//!     them for good, where upstream's stack copy is soon overwritten.
 //!   - The key share is filled in place by a noinline `KeyShare.initInPlace`, instead of
 //!     `KeyShare.init` returning 18 KiB by value: with key generation inlined, that alone
 //!     made `init`'s frame 83 KiB; it is now 31 KiB.
@@ -230,6 +232,9 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
         // Only possible to happen if the seed is all zeroes.
         error.IdentityElement => return error.InsufficientEntropy,
     };
+    // microzig patch: in a static, the private keys would outlive the handshake for good
+    // (upstream's copy on the stack is soon overwritten). Wiped on every way out.
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_share_static));
     const key_share = &key_share_static;
 
     const extensions_payload = tls.extension(.supported_versions, array(u8, tls.ProtocolVersion, .{

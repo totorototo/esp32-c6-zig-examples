@@ -7,17 +7,17 @@
 typedef unsigned int sys_prot_t;
 
 extern uint32_t lwip_rand(void);
-extern void lwip_lock_core_mutex();
-extern void lwip_unlock_core_mutex();
 extern void lwip_assert_core_locked();
 extern void lwip_assert(const char *msg, const char *file, int line);
 extern void lwip_diag(const char *msg, const char *file, int line);
 
 #define LWIP_ASSERT_CORE_LOCKED()   do { lwip_assert_core_locked(); } while (0)
 
+// `x` is a parenthesised printf argument list, which lwip_diag can't format: only the
+// location is logged.
 #define LWIP_PLATFORM_DIAG(x)                                                  \
     do {                                                                       \
-        lwip_diag((msg), __FILE__, __LINE__);                                  \
+        lwip_diag("lwIP diagnostic", __FILE__, __LINE__);                      \
     } while (0)
 #define LWIP_PLATFORM_ASSERT(msg)                                              \
     do {                                                                       \
@@ -37,8 +37,8 @@ extern void lwip_diag(const char *msg, const char *file, int line);
 #define LWIP_UNUSED_ARG(x) (void)x
 #define LWIP_PROVIDE_ERRNO 0
 
-#define SYS_ARCH_DECL_PROTECT(lev) sys_prot_t lev
-#define SYS_ARCH_PROTECT(lev) lwip_lock_core_mutex()
-#define SYS_ARCH_UNPROTECT(lev) lwip_unlock_core_mutex()
+// SYS_ARCH_PROTECT is lwIP's default, `lev = sys_arch_protect()`: a critical section
+// (interrupts off) whose previous state is kept in `lev`, so it nests and works from an ISR.
+// See sys_arch_protect in exports.zig.
 
 #endif // lwip__cc_h

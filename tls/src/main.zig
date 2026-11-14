@@ -25,60 +25,9 @@ comptime {
 
 pub const panic = microzig.panic;
 
-pub const std_options: std.Options = with_page_size(microzig.std_options(.{
-    .log_level = .info,
-    .log_scope_levels = &.{
-        .{ .scope = .esp_radio, .level = .err },
-        .{ .scope = .esp_radio_timer, .level = .err },
-        .{ .scope = .esp_radio_wifi, .level = .err },
-        .{ .scope = .esp_radio_osi, .level = .err },
-        .{ .scope = .https, .level = .debug },
-    },
-    .logFn = uart_log,
-}));
+pub const std_options = net.std_options(&.{.{ .scope = .https, .level = .debug }});
 
-/// The TLS client's certificate-bundle lock wants an `std.Io`; `std.Io.failing` references
-/// file memory maps, which need a page size. Freestanding has none. Never actually used.
-fn with_page_size(o: std.Options) std.Options {
-    var with = o;
-    with.page_size_min = 4096;
-    with.page_size_max = 4096;
-    return with;
-}
-
-pub const microzig_options: microzig.Options = .{
-    .interrupts = .{
-        .interrupt30 = radio.interrupt_handler,
-        .interrupt31 = rtos.interrupt_handler,
-    },
-    .cpu = .{ .interrupt_stack = .{ .enable = true, .size = 8192 } },
-    .hal = .{
-        .rtos = .{ .enable = true },
-        .radio = .{ .wifi = .{ .on_packet_received = net.on_packet_received } },
-    },
-};
-
-var log_mutex: rtos.Mutex = .{};
-var log_buf: [256]u8 = undefined;
-
-fn uart_log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    // In a trap or a panic (interrupts off) the RTOS mutex can't be taken: write unlocked,
-    // or the error report itself would deadlock and the board would just freeze.
-    const mstatus = asm volatile ("csrr %[r], mstatus"
-        : [r] "=r" (-> u32),
-    );
-    const locked = mstatus & 0x8 != 0;
-    if (locked) log_mutex.lock();
-    defer if (locked) log_mutex.unlock();
-    const prefix = comptime "[" ++ level.asText() ++ "] " ++ (if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ");
-    const line = std.fmt.bufPrint(&log_buf, prefix ++ format ++ "\r\n", args) catch return;
-    hal.uart.write(0, line);
-}
+pub const microzig_options = net.microzig_options;
 
 var response: [4096]u8 = undefined;
 

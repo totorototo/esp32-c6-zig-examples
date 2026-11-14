@@ -124,6 +124,7 @@ pub fn create_user(arena: std.mem.Allocator, bridge: Bridge, devicetype: []const
 /// Asks the LAN for a Hue bridge over mDNS (see mdns.zig) and returns the first one that
 /// answers, or null after `tries` queries a second apart.
 pub fn discover(tries: u8) !?Bridge {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_UDP, 0, null) orelse
         return error.OutOfMemory;
     defer _ = lwip.c.netconn_delete(conn);
@@ -301,6 +302,7 @@ fn parse(comptime T: type, arena: std.mem.Allocator, body: []const u8) !T {
 /// HTTP/1.0 so the bridge can't answer with chunked encoding: it closes the connection
 /// after the body, which is how we find the end.
 fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u8) ![]const u8 {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
         return error.OutOfMemory;
     defer _ = lwip.c.netconn_delete(conn);

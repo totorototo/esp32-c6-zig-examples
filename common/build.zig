@@ -41,9 +41,15 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     const lwip = lwip_dep.module("lwip");
     lwip.linkLibrary(foundation_dep.artifact("foundation"));
 
+    // The UART0 logger the RTOS samples share (safe to call from a trap or a panic), also
+    // wired into net.std_options.
+    const uart_log = b.createModule(.{ .root_source_file = common.path("src/uart_log.zig") });
+    fw.add_app_import("uart_log", uart_log, .{ .depend_on_microzig = true });
+
     const net = b.createModule(.{ .root_source_file = common.path("src/net.zig") });
     net.addImport("lwip", lwip);
     net.addImport("config", opts.config);
+    net.addImport("uart_log", uart_log);
     fw.add_app_import("net", net, .{ .depend_on_microzig = true });
 
     // HTTPS on top of it (TLS 1.3, see src/https.zig for what the firmware must provide).

@@ -55,8 +55,11 @@ fn uart_log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    log_mutex.lock();
-    defer log_mutex.unlock();
+    // In a trap or a panic (interrupts off) the RTOS mutex can't be taken: write unlocked,
+    // or the error report itself would deadlock.
+    const locked = microzig.interrupt.globally_enabled();
+    if (locked) log_mutex.lock();
+    defer if (locked) log_mutex.unlock();
     const prefix = comptime "[" ++ level.asText() ++ "] " ++ (if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ");
     const line = std.fmt.bufPrint(&log_buf, prefix ++ format ++ "\r\n", args) catch return;
     hal.uart.write(0, line);
@@ -145,8 +148,7 @@ pub fn main() !void {
         }
         std.log.info("first boot: config saved, resetting", .{});
         rtos.sleep(.from_ms(50)); // let the UART drain
-        // CPU reset: Wokwi ignores the C6 system reset.
-        hal.rom.software_reset_cpu();
+        reset_chip();
     }
 
     expect(std.mem.eql(u8, saved, ssid), "the station ssid survived the reset");
@@ -168,4 +170,14 @@ pub fn main() !void {
         std.log.err("wifinvs test: FAIL ({} checks failed)", .{failures});
     }
     while (true) rtos.sleep(.from_ms(1000));
+}
+
+/// Reboots the whole chip (radio and peripherals too, like the reset button). Wokwi ignores
+/// the C6 system reset, so if the chip is still running a moment later, a CPU reset (which
+/// Wokwi does) takes over. On hardware the system reset always wins: a CPU-only reset would
+/// leave the radio and the other peripherals running into the next boot.
+fn reset_chip() noreturn {
+    microzig.chip.peripherals.LP_AON.SYS_CFG.modify(.{ .HPSYS_SW_RESET = 1 });
+    hal.rom.delay_us(10_000);
+    hal.rom.software_reset_cpu();
 }

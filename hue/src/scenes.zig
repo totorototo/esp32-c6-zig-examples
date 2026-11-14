@@ -20,6 +20,7 @@ pub const Scene = struct {
 /// during the call. `scratch` holds the scanner's nesting stack and any string that needed
 /// unescaping; 1 KiB is plenty.
 pub fn parse(body: []const u8, scratch: []u8, sink: anytype) !void {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var fba: std.heap.FixedBufferAllocator = .init(scratch);
     var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), body);
     // Leaked into `fba`, which is dropped on return.

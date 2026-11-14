@@ -19,10 +19,12 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 
 Each directory is its own Zig package: `cd` into it and follow its README.
 
-[`common`](common) is not an example: it holds the networking code `weblight` and `hue`
-share (Wi-Fi bring-up, lwIP's OS glue and `lwipopts.h`, small HTTP helpers). They depend on it
-by path and call `common.add_net(...)` from their `build.zig`, which builds lwIP and adds a
-`net` module to the firmware. To copy one of them out of this repo, take `common/` along.
+[`common`](common) is not an example: it holds the code the Wi-Fi samples (`weblight`, `hue`,
+`tls`, `netatmo`) share: Wi-Fi bring-up and reconnection, lwIP's OS glue and `lwipopts.h`,
+small HTTP helpers, the HTTPS client, the UART logger, and the touch screen drivers. They
+depend on it by path and call `common.add_net(...)` (and `add_screen`) from their `build.zig`,
+which builds lwIP and adds the `net`, `https`, `uart_log` and `screen` modules to the
+firmware. To copy one of them out of this repo, take `common/` along.
 
 ## Requirements
 

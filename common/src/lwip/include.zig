@@ -19,7 +19,7 @@ pub fn c_err(res: c.err_t) Error!void {
         c.ERR_RST => error.ConnectionReset,
         c.ERR_CLSD => error.ConnectionClosed,
         c.ERR_ARG => error.IllegalArgument,
-        else => @panic("unexpected character"),
+        else => @panic("unknown lwIP error code"),
     };
 }
 

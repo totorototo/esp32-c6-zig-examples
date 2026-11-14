@@ -57,7 +57,7 @@
   }
   const fail = () => { $('st').textContent = 'board not reachable'; };
   function set(params) {
-    fetch('/set?' + new URLSearchParams(params), { method: 'POST' }).then((r) => r.json()).then(show).catch(fail);
+    fetch('/set?' + new URLSearchParams(params), { method: 'POST', headers: { 'X-Hue-Remote': '1' } }).then((r) => r.json()).then(show).catch(fail);
   }
   const poll = () => fetch('/state').then((r) => r.json()).then(show).catch(fail);
 

@@ -15,6 +15,7 @@ pub fn resolve(host: [:0]const u8) !lwip.c.ip_addr_t {
 
 /// Sends `request` to `addr:port` over UDP and copies the first reply into `reply`.
 pub fn udp_exchange(addr: lwip.c.ip_addr_t, port: u16, request: []const u8, reply: []u8, timeout_ms: u32) !usize {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_UDP, 0, null) orelse
         return error.OutOfMemory;
     defer _ = lwip.c.netconn_delete(conn);
@@ -70,6 +71,7 @@ pub const Tcp = struct {
     }
 
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
         const t: *Tcp = @alignCast(@fieldParentPtr("reader", r));
         if (t.pending == null) {
             if (t.closed) return error.EndOfStream;

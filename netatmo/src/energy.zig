@@ -20,9 +20,20 @@ pub fn Text(comptime n: usize) type {
             return t.buf[0..t.len];
         }
 
+        /// For display text: cut to fit, at a UTF-8 character boundary (a cut in the middle
+        /// of `é` would leave an invalid byte for the font to draw).
         pub fn set(t: *Self, s: []const u8) void {
-            t.len = @intCast(@min(s.len, n));
-            @memcpy(t.buf[0..t.len], s[0..t.len]);
+            @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+            var len = @min(s.len, n);
+            while (len > 0 and len < s.len and s[len] & 0xC0 == 0x80) len -= 1;
+            t.len = @intCast(len);
+            @memcpy(t.buf[0..len], s[0..len]);
+        }
+
+        /// For ids, which go back to the API: a cut one would name another room, or none.
+        pub fn set_exact(t: *Self, s: []const u8) error{ValueTooLong}!void {
+            if (s.len > n) return error.ValueTooLong;
+            t.set(s);
         }
 
         pub fn eql(t: *const Self, s: []const u8) bool {
@@ -98,6 +109,7 @@ pub const Error = error{ BadResponse, OutOfMemory, BufferUnderrun, ValueTooLong 
 /// `{"body":{"homes":[{"id","name","rooms":[...],"modules":[...],...}]},"status":"ok"}`.
 /// Reads the first home (or the one with `want_id`) into `home`. Returns false if none.
 pub fn read_homesdata(src: anytype, scratch: std.mem.Allocator, want_id: ?[]const u8, home: *Home) Error!bool {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var found = false;
     try expect(src, .object_begin);
     while (try key(src, scratch)) |k| {
@@ -141,9 +153,10 @@ pub fn read_homesdata(src: anytype, scratch: std.mem.Allocator, want_id: ?[]cons
 
 /// Reads one home object, `{` already consumed by `next_in_array`.
 fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     while (try key(src, scratch)) |k| {
         if (std.mem.eql(u8, k, "id")) {
-            h.id.set(try string(src, scratch));
+            try h.id.set_exact(try string(src, scratch));
         } else if (std.mem.eql(u8, k, "name")) {
             h.name.set(try string(src, scratch));
         } else if (std.mem.eql(u8, k, "rooms")) {
@@ -151,7 +164,7 @@ fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
             while (try next_in_array(src)) {
                 var r: Room = .{};
                 while (try key(src, scratch)) |rk| {
-                    if (std.mem.eql(u8, rk, "id")) r.id.set(try string(src, scratch)) else if (std.mem.eql(u8, rk, "name")) r.name.set(try string(src, scratch)) else if (std.mem.eql(u8, rk, "type")) r.type.set(try string(src, scratch)) else try src.skipValue();
+                    if (std.mem.eql(u8, rk, "id")) try r.id.set_exact(try string(src, scratch)) else if (std.mem.eql(u8, rk, "name")) r.name.set(try string(src, scratch)) else if (std.mem.eql(u8, rk, "type")) r.type.set(try string(src, scratch)) else try src.skipValue();
                 }
                 if (h.new_room()) |slot| slot.* = r;
             }
@@ -160,7 +173,7 @@ fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
             while (try next_in_array(src)) {
                 var m: Module = .{};
                 while (try key(src, scratch)) |mk| {
-                    if (std.mem.eql(u8, mk, "id")) m.id.set(try string(src, scratch)) else if (std.mem.eql(u8, mk, "type")) m.type.set(try string(src, scratch)) else if (std.mem.eql(u8, mk, "name")) m.name.set(try string(src, scratch)) else if (std.mem.eql(u8, mk, "room_id")) m.room_id.set(try string(src, scratch)) else try src.skipValue();
+                    if (std.mem.eql(u8, mk, "id")) try m.id.set_exact(try string(src, scratch)) else if (std.mem.eql(u8, mk, "type")) m.type.set(try string(src, scratch)) else if (std.mem.eql(u8, mk, "name")) m.name.set(try string(src, scratch)) else if (std.mem.eql(u8, mk, "room_id")) try m.room_id.set_exact(try string(src, scratch)) else try src.skipValue();
                 }
                 if (h.new_module()) |slot| slot.* = m;
             }
@@ -172,6 +185,7 @@ fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
 
 /// `{"body":{"home":{"id","rooms":[{"id","therm_measured_temperature",...}],"modules":[...]}}}`.
 pub fn read_homestatus(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     try expect(src, .object_begin);
     while (try key(src, scratch)) |k| {
         if (!std.mem.eql(u8, k, "body")) {
@@ -199,11 +213,12 @@ pub fn read_homestatus(src: anytype, scratch: std.mem.Allocator, home: *Home) Er
 }
 
 fn read_room_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var s: Room = .{};
     var heating: ?u8 = null;
     while (try key(src, scratch)) |k| {
         if (std.mem.eql(u8, k, "id")) {
-            s.id.set(try string(src, scratch));
+            try s.id.set_exact(try string(src, scratch));
         } else if (std.mem.eql(u8, k, "therm_measured_temperature")) {
             s.measured = try number(f32, src, scratch);
         } else if (std.mem.eql(u8, k, "therm_setpoint_temperature")) {
@@ -226,12 +241,13 @@ fn read_room_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error
 }
 
 fn read_module_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var id: Text(18) = .{};
     var reachable = false;
     var battery: Text(10) = .{};
     while (try key(src, scratch)) |k| {
         if (std.mem.eql(u8, k, "id")) {
-            id.set(try string(src, scratch));
+            try id.set_exact(try string(src, scratch));
         } else if (std.mem.eql(u8, k, "reachable")) {
             reachable = try boolean(src);
         } else if (std.mem.eql(u8, k, "battery_state")) {
@@ -433,4 +449,18 @@ test "percent encoding" {
     var w: std.Io.Writer = .fixed(&buf);
     try percent_encode(&w, "5c3d|a b+c/é");
     try testing.expectEqualStrings("5c3d%7Ca%20b%2Bc%2F%C3%A9", w.buffered());
+}
+
+test "text: names cut at a character, ids refused" {
+    var fits: Text(6) = .{};
+    fits.set("Séjour"); // 7 bytes: the cut falls between `u` and `r`
+    try std.testing.expectEqualStrings("Séjou", fits.slice());
+    var short: Text(4) = .{};
+    short.set("Aloïse"); // a cut at 4 would split `ï` (bytes 3-4)
+    try std.testing.expectEqualStrings("Alo", short.slice());
+
+    var id: Text(4) = .{};
+    try id.set_exact("1234");
+    try std.testing.expectError(error.ValueTooLong, id.set_exact("12345"));
+    try std.testing.expectEqualStrings("1234", id.slice());
 }

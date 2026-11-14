@@ -7,20 +7,44 @@ pub const Request = struct {
     method: []const u8,
     path: []const u8,
     query: []const u8,
+    /// The header lines, after the request line.
+    headers: []const u8,
 
     pub fn is(req: Request, method: []const u8, path: []const u8) bool {
         return std.mem.eql(u8, req.method, method) and std.mem.eql(u8, req.path, path);
     }
+
+    /// The value of header `name` (case-insensitive), or null.
+    pub fn header(req: Request, name: []const u8) ?[]const u8 {
+        var lines = std.mem.splitSequence(u8, req.headers, "\r\n");
+        while (lines.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
+        }
+        return null;
+    }
+};
+
+pub const Timeouts = struct {
+    /// For the first bytes. Browsers open speculative connections that send nothing; on a
+    /// single-task server each one would stall everything else for `rest_ms`. Closed early,
+    /// the browser just opens a new connection when it does have a request.
+    first_ms: u32 = 150,
+    /// For the rest of the head, once the client has started sending.
+    rest_ms: u32 = 3000,
 };
 
 /// Reads the request line and headers; any body is ignored.
-pub fn read_request(conn: *lwip.c.netconn, buf: []u8) !Request {
+pub fn read_request(conn: *lwip.c.netconn, buf: []u8, timeouts: Timeouts) !Request {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var len: usize = 0;
+    conn.recv_timeout = timeouts.first_ms;
     while (std.mem.indexOf(u8, buf[0..len], "\r\n\r\n") == null) {
         if (len == buf.len) return error.RequestTooLarge;
 
         var nb: ?*lwip.c.netbuf = null;
         try lwip.c_err(lwip.c.netconn_recv(conn, &nb));
+        conn.recv_timeout = timeouts.rest_ms;
         defer lwip.c.netbuf_delete(nb);
         while (true) {
             var ptr: ?*anyopaque = null;
@@ -34,8 +58,8 @@ pub fn read_request(conn: *lwip.c.netconn, buf: []u8) !Request {
         }
     }
 
-    const head = buf[0..len];
-    const line_end = std.mem.indexOf(u8, head, "\r\n").?;
+    const head = buf[0 .. std.mem.indexOf(u8, buf[0..len], "\r\n\r\n").?];
+    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
     var it = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
     const method = it.next() orelse return error.BadRequest;
     const target = it.next() orelse return error.BadRequest;
@@ -44,6 +68,7 @@ pub fn read_request(conn: *lwip.c.netconn, buf: []u8) !Request {
         .method = method,
         .path = target[0 .. q orelse target.len],
         .query = if (q) |i| target[i + 1 ..] else "",
+        .headers = if (line_end < head.len) head[line_end + 2 ..] else "",
     };
 }
 

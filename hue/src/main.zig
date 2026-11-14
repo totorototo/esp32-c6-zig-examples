@@ -6,7 +6,7 @@
 //!      bridge's link button). A paired username is saved, so pairing happens once.
 //!   3. Logs the lights, rooms, zones and scenes, then controls them:
 //!      - Touch screen (ILI9341 + FT6206, `-Dscreen=true`, the default): rooms first, each
-//!        with its brightness, colour, scenes and lights (screen.zig), and every light. It
+//!        with its brightness, colour, scenes and lights (list.zig), and every light. It
 //!        reopens on the last one open (or `-Dhue_light`), and dims when left alone.
 //!      - Web remote on port 80, on the selected entry: on/off, brightness, colour.
 //!      - The on-board LED (RMT, GPIO8) shows the status, then mirrors the selected entry.
@@ -25,8 +25,8 @@ const ui = @import("ui.zig");
 const catalog = @import("catalog.zig");
 /// The touch UI: rooms and lights with a page each (`-Dui=list`), or the gesture-only experiment
 /// (`-Dui=field`). Both have the same interface.
-const screen = switch (config.ui) {
-    .list => @import("screen.zig"),
+const touch_ui = switch (config.ui) {
+    .list => @import("list.zig"),
     .field => @import("field.zig"),
 };
 const ili9341 = @import("screen").lcd;
@@ -50,44 +50,9 @@ comptime {
 
 pub const panic = microzig.panic;
 
-pub const std_options = microzig.std_options(.{
-    .log_level = .info,
-    .log_scope_levels = &.{
-        .{ .scope = .esp_radio, .level = .err },
-        .{ .scope = .esp_radio_timer, .level = .err },
-        .{ .scope = .esp_radio_wifi, .level = .err },
-        .{ .scope = .esp_radio_osi, .level = .err },
-    },
-    .logFn = uart_log,
-});
+pub const std_options = net.std_options(&.{});
 
-pub const microzig_options: microzig.Options = .{
-    .interrupts = .{
-        .interrupt30 = radio.interrupt_handler,
-        .interrupt31 = rtos.interrupt_handler,
-    },
-    .cpu = .{ .interrupt_stack = .{ .enable = true, .size = 8192 } },
-    .hal = .{
-        .rtos = .{ .enable = true },
-        .radio = .{ .wifi = .{ .on_packet_received = net.on_packet_received } },
-    },
-};
-
-var log_mutex: rtos.Mutex = .{};
-var log_buf: [256]u8 = undefined;
-
-fn uart_log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    log_mutex.lock();
-    defer log_mutex.unlock();
-    const prefix = comptime "[" ++ level.asText() ++ "] " ++ (if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ");
-    const line = std.fmt.bufPrint(&log_buf, prefix ++ format ++ "\r\n", args) catch return;
-    hal.uart.write(0, line);
-}
+pub const microzig_options = net.microzig_options;
 
 const devicetype = "microzig_hue#esp32c6";
 const poll_ms = 20;
@@ -134,7 +99,7 @@ pub fn main() !void {
         backlight.init();
         ili9341.init(screen_pins);
         if (ft6206.init(touch_sda, touch_scl)) {
-            screen.touch_ok = true;
+            touch_ui.touch_ok = true;
         } else |err| std.log.warn("touch controller not found ({t}): screen is display-only", .{err});
     }
     boot_button.apply(.{ .input_enable = true, .pull = .up });
@@ -194,7 +159,7 @@ pub fn main() !void {
         };
     }
     if (catalog.selected()) |e| {
-        if (config.screen) screen.open(e);
+        if (config.screen) touch_ui.open(e);
     } else if (!config.screen) {
         // Without the screen, nothing else can pick a light.
         std.log.info("rebuild with -Dhue_light=<id> to control one of these", .{});
@@ -320,7 +285,16 @@ fn forget() noreturn {
 
 fn restart() noreturn {
     rtos.sleep(.from_ms(500)); // let the log and the screen catch up
-    // A CPU reset reboots through the ROM like a system reset, and also works in Wokwi.
+    reset_chip();
+}
+
+/// Reboots the whole chip (radio and peripherals too, like the reset button). Wokwi ignores
+/// the C6 system reset, so if the chip is still running a moment later, a CPU reset (which
+/// Wokwi does) takes over. On hardware the system reset always wins: a CPU-only reset would
+/// leave the radio and the other peripherals running into the next boot.
+fn reset_chip() noreturn {
+    microzig.chip.peripherals.LP_AON.SYS_CFG.modify(.{ .HPSYS_SW_RESET = 1 });
+    hal.rom.delay_us(10_000);
     hal.rom.software_reset_cpu();
 }
 
@@ -373,8 +347,9 @@ fn demo() noreturn {
     while (true) {
         const t = now_ms();
         if (config.screen) {
-            screen.tick(ctx, t);
-            if (!config.demo or config.ui == .list) backlight.tick(t);
+            touch_ui.tick(ctx, t);
+            // The field UI's demo plays gestures by itself: no dimming under it.
+            if (config.ui == .list) backlight.tick(t);
         }
         if (catalog.selected()) |e| {
             if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
@@ -423,7 +398,7 @@ fn control(ctx: catalog.Context) !void {
 
         const t = now_ms();
         if (config.screen) {
-            screen.tick(ctx, t);
+            touch_ui.tick(ctx, t);
             backlight.tick(t);
         }
 
@@ -431,17 +406,17 @@ fn control(ctx: catalog.Context) !void {
         // the screen just navigated to.
         // Check `busy` first: navigation happens with the finger still down, and taking
         // the request then would drop it.
-        const idle = !(config.screen and screen.busy());
-        if (idle and (t - last_refresh >= refresh_ms or (config.screen and screen.take_refresh_request()))) {
+        const idle = !(config.screen and touch_ui.busy());
+        if (idle and (t - last_refresh >= refresh_ms or (config.screen and touch_ui.take_refresh_request()))) {
             last_refresh = t;
             const result = if (config.screen)
-                screen.refresh(ctx)
+                touch_ui.refresh(ctx)
             else if (catalog.selected()) |e| catalog.refresh_entry(ctx, e);
             if (result) |_| {
-                if (config.screen) screen.report_refresh(true);
+                if (config.screen) touch_ui.report_refresh(true);
             } else |err| {
                 std.log.warn("refresh failed: {t}", .{err});
-                if (config.screen) screen.report_refresh(false);
+                if (config.screen) touch_ui.report_refresh(false);
             }
         }
 
@@ -459,8 +434,8 @@ fn control(ctx: catalog.Context) !void {
             if (config.screen) _ = backlight.wake(t);
             const held = t - since;
             if (held >= forget_hold_ms) forget();
-            if (held >= ask_hold_ms and !asked and config.screen and screen.can_confirm and screen.touch_ok) {
-                screen.ask_forget();
+            if (held >= ask_hold_ms and !asked and config.screen and touch_ui.can_confirm and touch_ui.touch_ok) {
+                touch_ui.ask_forget();
                 asked = true;
             }
         } else if (button_down_since) |since| {
@@ -468,22 +443,31 @@ fn control(ctx: catalog.Context) !void {
             button_down_since = null;
             asked = false;
         }
-        if (config.screen and screen.take_forget()) forget();
+        if (config.screen and touch_ui.take_forget()) forget();
     }
 }
 
 // ---- web remote ----
 
 const page = @embedFile("page.html");
+/// Required on every POST (any value), see `serve`.
+const remote_header = "X-Hue-Remote";
 
 fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
-    conn.recv_timeout = 3000;
+    // Short timeouts (see web.Timeouts): this runs inside the UI loop, and a browser's
+    // speculative connection that sends nothing would otherwise freeze the touch screen.
     var buf: [1024]u8 = undefined;
-    const req = web.read_request(conn, &buf) catch |err| switch (err) {
+    const req = web.read_request(conn, &buf, .{}) catch |err| switch (err) {
         error.BadRequest => return web.respond(conn, "400 Bad Request", "text/plain", "bad request\n"),
         else => return err,
     };
     std.log.info("{s} {s}{s}{s}", .{ req.method, req.path, if (req.query.len > 0) "?" else "", req.query });
+
+    // Any web page the user opens could send a bodiless POST here (no CORS preflight for
+    // those). A custom header makes the browser ask first, and the board never says yes,
+    // so only page.html (same origin) and curl -H get through.
+    if (std.mem.eql(u8, req.method, "POST") and req.header(remote_header) == null)
+        return web.respond(conn, "403 Forbidden", "text/plain", "missing the " ++ remote_header ++ " header\n");
 
     if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
     if (req.is("GET", "/state")) return respond_state(conn);

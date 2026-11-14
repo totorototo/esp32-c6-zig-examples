@@ -36,6 +36,9 @@ HTTPS-only, and there is no TLS stack in the firmware.
    - Web remote on port 80, on what's selected: on/off, a brightness slider, and a colour
      picker (hidden for white-only lights). `GET /state` returns JSON;
      `POST /set?on=1&bri=200&hue=8000&sat=254` applies any subset of the parameters.
+     Every POST needs an `X-Hue-Remote` header (any value, e.g. `curl -H 'X-Hue-Remote: 1'`):
+     without it any web page you open could send them, since browsers don't ask before a
+     bodiless cross-site POST but do ask before one with a custom header.
    - The on-board LED (WS2812 on GPIO8, driven by RMT so it works next to the screen)
      shows the status (blue = starting or searching, orange = waiting for you, green =
      done, red = error), then mirrors the selected light or room.
@@ -45,7 +48,9 @@ HTTPS-only, and there is no TLS stack in the firmware.
      bottom, over a page that stays usable, until one works.
 
    Everything runs in one loop: `netconn_accept` with a 20 ms timeout doubles as the
-   touch polling tick, so there is no second task and no locking.
+   touch polling tick, so there is no second task and no locking. A web client gets
+   150 ms to start its request, so an idle browser connection can't freeze the screen.
+   (Wi-Fi reconnects by itself, in ../common's own task.)
 
 **When something is wrong**, the board says so on the screen and the LED, and never
 panics. What can pass (no bridge yet, bridge not answering) is retried every 10 s. What
@@ -54,7 +59,7 @@ until you rebuild.
 
 **The BOOT button:** a short press turns every light off. Held 3 s, the screen asks
 FORGET / CANCEL; held 10 s (or with no touch screen, in the field UI, or while the board is
-still looking for the bridge), or `curl -X POST http://<board>/forget`, it doesn't ask. The
+still looking for the bridge), or `curl -X POST -H 'X-Hue-Remote: 1' http://<board>/forget`, it doesn't ask. The
 board forgets the bridge, the username and the selection, and restarts.
 
 ## Experimental: the field UI (`-Dui=field`)

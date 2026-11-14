@@ -19,6 +19,7 @@ pub const ParseError = error{ Truncated, NotAServerReply, Unsynchronized };
 
 /// The server's transmit time, as Unix seconds.
 pub fn parse_reply(msg: []const u8) ParseError!i64 {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     if (msg.len < packet_len) return error.Truncated;
     const mode = msg[0] & 0x7;
     if (mode != 4) return error.NotAServerReply;

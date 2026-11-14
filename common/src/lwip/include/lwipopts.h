@@ -34,7 +34,8 @@
 #define LWIP_NETIF_API 1
 #define LWIP_NETIF_STATUS_CALLBACK 1
 
-// weblight: receive timeouts, so a stalled browser connection cannot block the server.
+// Receive timeouts: a stalled peer can't block a single-task server, and accept() can
+// double as a loop tick (hue).
 #define LWIP_SO_RCVTIMEO 1
 
 #endif

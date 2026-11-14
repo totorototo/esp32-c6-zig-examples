@@ -1,4 +1,4 @@
-//! The list UI's pages, drawn and hit-tested. Navigation and touch live in screen.zig.
+//! The list UI's pages, drawn and hit-tested. Navigation and touch live in list.zig.
 //!
 //!   home                      room (or light)           a room's scenes or lights
 //!   +----------------------+  +----------------------+  +----------------------+

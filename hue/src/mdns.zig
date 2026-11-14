@@ -51,6 +51,7 @@ pub const ParseError = error{ Truncated, BadName, NotAResponse };
 
 /// Reads a response. Records of other services are ignored, not an error.
 pub fn parse(msg: []const u8) ParseError!Answer {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     if (msg.len < 12) return error.Truncated;
     const flags = read_u16(msg, 2);
     if (flags & 0x8000 == 0) return error.NotAResponse;
@@ -91,6 +92,7 @@ pub fn parse(msg: []const u8) ParseError!Answer {
 /// Decodes the (possibly compressed) name at `off` as dotted text into `buf`. Returns the
 /// name and the offset just past it in the record.
 fn read_name(msg: []const u8, start: usize, buf: *[256]u8) ParseError!struct { []const u8, usize } {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var off = start;
     var end: ?usize = null; // where the record continues, once a pointer was followed
     var len: usize = 0;
@@ -131,6 +133,7 @@ fn skip_name(msg: []const u8, off: usize) ParseError!usize {
 }
 
 fn read_u16(msg: []const u8, off: usize) u16 {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     return std.mem.readInt(u16, msg[off..][0..2], .big);
 }
 

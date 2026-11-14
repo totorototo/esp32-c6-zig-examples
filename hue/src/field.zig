@@ -10,7 +10,7 @@
 //!   swipe up from the    the room's scenes, each a full-width band in the scene's own
 //!   bottom edge          colours; tap one to recall it, swipe to page, down to close
 //!
-//! Same interface as screen.zig, so main.zig picks one at comptime. Lights are browsed only
+//! Same interface as list.zig, so main.zig picks one at comptime. Lights are browsed only
 //! when the bridge has no rooms.
 const std = @import("std");
 const config = @import("config");

@@ -25,45 +25,9 @@ comptime {
 
 pub const panic = microzig.panic;
 
-pub const std_options = microzig.std_options(.{
-    .log_level = .info,
-    .log_scope_levels = &.{
-        .{ .scope = .esp_radio, .level = .err },
-        .{ .scope = .esp_radio_timer, .level = .err },
-        .{ .scope = .esp_radio_wifi, .level = .err },
-        .{ .scope = .esp_radio_osi, .level = .err },
-    },
-    .logFn = uart_log,
-});
+pub const std_options = net.std_options(&.{});
 
-pub const microzig_options: microzig.Options = .{
-    .interrupts = .{
-        .interrupt30 = radio.interrupt_handler,
-        .interrupt31 = rtos.interrupt_handler,
-    },
-    .cpu = .{ .interrupt_stack = .{ .enable = true, .size = 8192 } },
-    .hal = .{
-        .rtos = .{ .enable = true },
-        .radio = .{ .wifi = .{ .on_packet_received = net.on_packet_received } },
-    },
-};
-
-// Several RTOS tasks log (Wi-Fi driver, lwIP, main), so the shared line buffer needs a lock.
-var log_mutex: rtos.Mutex = .{};
-var log_buf: [256]u8 = undefined;
-
-fn uart_log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    log_mutex.lock();
-    defer log_mutex.unlock();
-    const prefix = comptime "[" ++ level.asText() ++ "] " ++ (if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ");
-    const line = std.fmt.bufPrint(&log_buf, prefix ++ format ++ "\r\n", args) catch return;
-    hal.uart.write(0, line);
-}
+pub const microzig_options = net.microzig_options;
 
 const http_port = 80;
 
@@ -121,12 +85,10 @@ fn apply_state() !void {
 // ---- HTTP ----
 
 fn serve(conn: *lwip.c.netconn) !void {
-    // Without this a browser that opens a speculative connection and sends nothing would
-    // block the (single-threaded) server.
-    conn.recv_timeout = 3000;
-
+    // Short timeouts (see web.Timeouts): a browser that opens a speculative connection and
+    // sends nothing would otherwise block the single-threaded server.
     var buf: [1024]u8 = undefined;
-    const req = web.read_request(conn, &buf) catch |err| switch (err) {
+    const req = web.read_request(conn, &buf, .{}) catch |err| switch (err) {
         error.BadRequest => return web.respond(conn, "400 Bad Request", "text/plain", "bad request\n"),
         else => return err,
     };

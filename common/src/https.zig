@@ -110,6 +110,7 @@ var conn_client: TlsClient = undefined;
 /// bytes that a streaming parser (std.json.Reader) can read straight from `Stream.body`,
 /// without buffering a response that may be bigger than the free RAM.
 pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers: []const Header, body: []const u8) !Stream {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const unix = now() orelse return error.NoTime;
 
     var fba: std.heap.FixedBufferAllocator = .init(&bundle_mem);
@@ -189,6 +190,7 @@ pub fn request(
     body: []const u8,
     buf: []u8,
 ) !Response {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     var stream = try open(host, method, target, headers, body);
     defer stream.close();
     const want = stream.content_length orelse buf.len;

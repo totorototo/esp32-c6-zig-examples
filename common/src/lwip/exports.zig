@@ -14,21 +14,24 @@ const log = std.log.scoped(.lwip);
 // the correct types in sys_arch.h
 
 pub var gpa: std.mem.Allocator = undefined;
-pub var core_mutex: rtos.Mutex = .{};
 
-export fn lwip_lock_core_mutex() void {
-    core_mutex.lock();
+/// SYS_ARCH_PROTECT: interrupts off. lwIP may nest it and call it from an ISR, which rules
+/// out a mutex. Returns whether interrupts were on, for `sys_arch_unprotect`.
+export fn sys_arch_protect() c.sys_prot_t {
+    const was_enabled = microzig.interrupt.globally_enabled();
+    microzig.interrupt.disable_interrupts();
+    return @intFromBool(was_enabled);
 }
 
-export fn lwip_unlock_core_mutex() void {
-    core_mutex.unlock();
+export fn sys_arch_unprotect(was_enabled: c.sys_prot_t) void {
+    if (was_enabled != 0) microzig.interrupt.enable_interrupts();
 }
 
 export fn lwip_assert_core_locked() void {
     if (c.lock_tcpip_core == null) return;
 
     const mutex: *rtos.Mutex = @ptrCast(@alignCast(c.lock_tcpip_core));
-    std.debug.assert(mutex.locked != null);
+    std.debug.assert(mutex.locked == rtos.get_current_task());
 }
 
 export fn lwip_rand() u32 {
@@ -122,8 +125,12 @@ export fn sys_mbox_trypost(ptr: *c.sys_mbox_t, element: MailboxElement) c.err_t 
     return c.ERR_OK;
 }
 
-comptime {
-    @export(&sys_mbox_trypost, .{ .name = "sys_mbox_trypost_fromisr" });
+/// From an ISR: must not block, and must not take a mutex.
+export fn sys_mbox_trypost_fromisr(ptr: *c.sys_mbox_t, element: MailboxElement) c.err_t {
+    const mailbox: *Mailbox = @ptrCast(@alignCast(ptr.*));
+    // A woken higher-priority task runs at the next tick: lwIP has no way to pass it back.
+    var hptw = false;
+    return if (mailbox.put_one_from_isr(element, &hptw)) c.ERR_OK else c.ERR_MEM;
 }
 
 export fn sys_arch_mbox_fetch(ptr: *c.sys_mbox_t, element_ptr: *MailboxElement, timeout: u32) u32 {
@@ -188,13 +195,15 @@ fn task_wrapper(
     task_entry.?(param);
 }
 
+/// Without TCPIP_THREAD_STACKSIZE in lwipopts.h, lwIP asks for 0 bytes.
+const default_thread_stack = 4096;
+
 export fn sys_thread_new(name: [*:0]u8, thread: c.lwip_thread_fn, arg: ?*anyopaque, stacksize: c_int, prio: c_int) c.sys_thread_t {
-    _ = stacksize;
     _ = prio;
 
     return rtos.spawn(gpa, task_wrapper, .{ thread, arg }, .{
         .name = std.mem.span(name),
-        .stack_size = 4096,
+        .stack_size = if (stacksize > 0) @intCast(stacksize) else default_thread_stack,
         .priority = @fromBackingInt(2),
     }) catch @panic("failed to allocate lwip task");
 }
