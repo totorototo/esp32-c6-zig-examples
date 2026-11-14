@@ -68,3 +68,12 @@ test "bad replies" {
     try testing.expectError(error.Unsynchronized, parse_reply(&reply(4_003_257_600, 0xE4, 2)));
     try testing.expectError(error.Truncated, parse_reply(req[0..20]));
 }
+
+test "truncated and corrupted replies never panic" {
+    const mutations = @import("mutations");
+    try mutations.each(&reply(4_003_257_600, 0x24, 2), struct {
+        fn check(input: []u8) void {
+            _ = parse_reply(input) catch return;
+        }
+    }.check);
+}

@@ -274,3 +274,13 @@ test "other services are ignored" {
     const a = try parse(msg);
     try testing.expect(!a.service);
 }
+
+test "truncated and corrupted answers never panic" {
+    const mutations = @import("mutations");
+    var buf: [256]u8 = undefined;
+    try mutations.each(sample_answer(&buf, true), struct {
+        fn check(input: []u8) void {
+            _ = parse(input) catch return; // an error is a fine outcome, a panic is not
+        }
+    }.check);
+}

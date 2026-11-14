@@ -146,3 +146,22 @@ test "bad answers" {
     try parse("{}", &scratch, &empty);
     try testing.expectEqual(0, empty.len);
 }
+
+test "truncated and corrupted answers never panic" {
+    const mutations = @import("mutations");
+    try mutations.each(sample, struct {
+        /// Counts instead of copying: a corrupted name may be longer than Collect keeps.
+        const Count = struct {
+            n: usize = 0,
+            fn add(c: *@This(), s: Scene) void {
+                _ = s;
+                c.n += 1;
+            }
+        };
+        fn check(input: []u8) void {
+            var count: Count = .{};
+            var scratch: [1024]u8 = undefined;
+            parse(input, &scratch, &count) catch return;
+        }
+    }.check);
+}

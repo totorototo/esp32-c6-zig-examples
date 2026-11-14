@@ -82,13 +82,18 @@ pub fn add_screen(b: *std.Build, fw: anytype) void {
 /// on its own: keep tests in pure modules.
 ///
 /// Each file runs twice: in Debug, and in ReleaseSmall like the firmware, where asserts are
-/// gone and only `@setRuntimeSafety(true)` code keeps its checks.
+/// gone and only `@setRuntimeSafety(true)` code keeps its checks. Each can import
+/// `mutations` (src/testing/mutations.zig), the negative-space input generator.
 pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
+    const common = b.dependency("common", .{}).builder;
     add_tests_under(b, b, step);
-    add_tests_under(b, b.dependency("common", .{}).builder, step);
+    add_tests_under(b, common, step);
 }
 
+const mutations_path = "src/testing/mutations.zig";
+
 fn add_tests_under(b: *std.Build, pkg: *std.Build, step: *std.Build.Step) void {
+    const common = b.dependency("common", .{}).builder;
     const io = b.graph.io;
     const root_path = if (pkg.root.sub_path.len == 0) "." else pkg.root.sub_path;
     const root = pkg.root.root_dir.handle.openDir(io, root_path, .{}) catch |err|
@@ -117,14 +122,22 @@ fn add_tests_under(b: *std.Build, pkg: *std.Build, step: *std.Build.Step) void {
                 const has_test = std.mem.startsWith(u8, text, "test ") or
                     std.mem.indexOf(u8, text, "\ntest ") != null;
                 if (!has_test) continue;
+                // The generator's own test can't import itself: a file belongs to one module.
+                const is_mutations = pkg == common and std.mem.eql(u8, sub_path, mutations_path);
                 for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSmall }) |mode| {
+                    const module = b.createModule(.{
+                        .root_source_file = pkg.path(sub_path),
+                        .target = b.graph.host,
+                        .optimize = mode,
+                    });
+                    if (!is_mutations) module.addImport("mutations", b.createModule(.{
+                        .root_source_file = common.path(mutations_path),
+                        .target = b.graph.host,
+                        .optimize = mode,
+                    }));
                     const t = b.addTest(.{
                         .name = b.fmt("{s}-{t}", .{ std.fs.path.stem(entry.basename), mode }),
-                        .root_module = b.createModule(.{
-                            .root_source_file = pkg.path(sub_path),
-                            .target = b.graph.host,
-                            .optimize = mode,
-                        }),
+                        .root_module = module,
                     });
                     step.dependOn(&b.addRunArtifact(t).step);
                 }

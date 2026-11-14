@@ -88,6 +88,8 @@ pub const Home = struct {
     }
 
     fn new_room(h: *Home) ?*Room {
+        // `==` below only stops at the limit if the count never jumped past it.
+        std.debug.assert(h.n_rooms <= max_rooms);
         if (h.n_rooms == max_rooms) return null;
         h.rooms[h.n_rooms] = .{};
         h.n_rooms += 1;
@@ -95,6 +97,7 @@ pub const Home = struct {
     }
 
     fn new_module(h: *Home) ?*Module {
+        std.debug.assert(h.n_modules <= max_modules);
         if (h.n_modules == max_modules) return null;
         h.modules[h.n_modules] = .{};
         h.n_modules += 1;
@@ -463,4 +466,28 @@ test "text: names cut at a character, ids refused" {
     try id.set_exact("1234");
     try std.testing.expectError(error.ValueTooLong, id.set_exact("12345"));
     try std.testing.expectEqualStrings("1234", id.slice());
+}
+
+test "truncated and corrupted answers never panic" {
+    const mutations = @import("mutations");
+    try mutations.each(homesdata_json, struct {
+        fn check(input: []u8) void {
+            var scanner: std.json.Scanner = .initCompleteInput(testing.allocator, input);
+            defer scanner.deinit();
+            var scratch_mem: [1024]u8 = undefined;
+            var fba: std.heap.FixedBufferAllocator = .init(&scratch_mem);
+            var home: Home = .{};
+            _ = read_homesdata(&scanner, fba.allocator(), null, &home) catch return;
+        }
+    }.check);
+    try mutations.each(homestatus_json, struct {
+        fn check(input: []u8) void {
+            var scanner: std.json.Scanner = .initCompleteInput(testing.allocator, input);
+            defer scanner.deinit();
+            var scratch_mem: [1024]u8 = undefined;
+            var fba: std.heap.FixedBufferAllocator = .init(&scratch_mem);
+            var home: Home = .{};
+            read_homestatus(&scanner, fba.allocator(), &home) catch return;
+        }
+    }.check);
 }

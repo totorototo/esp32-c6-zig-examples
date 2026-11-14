@@ -11,6 +11,8 @@
 const std = @import("std");
 const microzig = @import("microzig");
 const flash = microzig.hal.flash;
+const rtos = microzig.hal.rtos;
+const verify = @import("verify").verify;
 
 const log = std.log.scoped(.settings);
 
@@ -22,7 +24,17 @@ const namespace = "hue";
 var store: flash.Nvs = undefined;
 var handle: ?flash.Nvs.Handle = null;
 
+/// The task that opened the store. Nothing here locks: only that task may use it.
+var owner: ?*rtos.Task = null;
+
+/// Negative space for "only the main task uses the store": a second task would race the
+/// NVS page buffer without a lock.
+fn check_owner() void {
+    verify(owner == null or owner.? == rtos.get_current_task(), "settings used from one task");
+}
+
 pub fn init() void {
+    owner = rtos.get_current_task();
     const partition = (flash.partition_table.find_data(.nvs, null) catch null) orelse {
         log.warn("no nvs partition: settings won't be remembered", .{});
         return;
@@ -39,6 +51,7 @@ pub fn init() void {
 
 /// The stored value, copied into `buf`, or null when there is none.
 pub fn get(key: Key, buf: []u8) ?[]const u8 {
+    check_owner();
     const h = handle orelse return null;
     return h.get_str(@tagName(key), buf) catch |err| switch (err) {
         error.NotFound => null,
@@ -52,6 +65,7 @@ pub fn get(key: Key, buf: []u8) ?[]const u8 {
 /// Stores `value` unless it is already the stored one, so repeated calls cost no flash
 /// writes.
 pub fn set(key: Key, value: []const u8) void {
+    check_owner();
     const h = handle orelse return;
     var buf: [64]u8 = undefined;
     if (get(key, &buf)) |old| if (std.mem.eql(u8, old, value)) return;
@@ -66,6 +80,7 @@ pub fn set(key: Key, value: []const u8) void {
 }
 
 pub fn erase(key: Key) void {
+    check_owner();
     const h = handle orelse return;
     h.erase_key(@tagName(key)) catch |err| switch (err) {
         error.NotFound => {},

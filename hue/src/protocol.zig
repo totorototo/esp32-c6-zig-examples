@@ -196,3 +196,27 @@ test "parse_ipv4" {
         "192.168.1.20 ",
     }) |bad| try testing.expectError(error.BadAddress, parse_ipv4(bad));
 }
+
+test "truncated and corrupted input never panics" {
+    const mutations = @import("mutations");
+    try mutations.each("on=1&bri=200&hue=8000&sat=254", struct {
+        fn check(input: []u8) void {
+            _ = parse_change(input) catch return;
+        }
+    }.check);
+    try mutations.each("192.168.1.20", struct {
+        fn check(input: []u8) void {
+            _ = parse_ipv4(input) catch return;
+        }
+    }.check);
+    const answers = "[{\"success\":{\"username\":\"83b7780291a6\"}}," ++
+        "{\"error\":{\"type\":101,\"description\":\"link button not pressed\"}}]";
+    try mutations.each(answers, struct {
+        fn check(input: []u8) void {
+            var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer arena.deinit();
+            _ = pairing_user(arena.allocator(), input, null) catch {};
+            check_error(arena.allocator(), input, null) catch return;
+        }
+    }.check);
+}

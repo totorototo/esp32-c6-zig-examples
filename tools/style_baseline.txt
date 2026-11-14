@@ -3,8 +3,7 @@
 columns blinky/src/main.zig 1
 columns boot/build.zig 3
 columns boot/src/main.zig 4
-fn common/src/https.zig open 71
-columns common/src/https.zig 7
+columns common/src/https.zig 5
 columns common/src/https/http.zig 8
 columns common/src/https/socket.zig 6
 columns common/src/lwip/exports.zig 2

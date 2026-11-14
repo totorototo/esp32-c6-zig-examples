@@ -108,3 +108,16 @@ test "params" {
     _, const empty = split_param("bri=").?;
     try testing.expectEqualStrings("", empty);
 }
+
+test "truncated and corrupted heads never panic" {
+    const mutations = @import("mutations");
+    const fixture = "POST /set?on=1&bri=200 HTTP/1.1\r\nHost: 192.168.1.20\r\nX-Hue-Remote: 1";
+    try mutations.each(fixture, struct {
+        fn check(input: []u8) void {
+            const req = parse(input) catch return;
+            _ = req.header("X-Hue-Remote");
+            var it = params(req.query);
+            while (it.next()) |pair| _ = split_param(pair);
+        }
+    }.check);
+}

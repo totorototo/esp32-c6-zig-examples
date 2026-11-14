@@ -18,6 +18,7 @@ const std = @import("std");
 const microzig = @import("microzig");
 const net = @import("net");
 const lwip = net.lwip;
+const verify = @import("verify").verify;
 pub const sntp = @import("https/sntp.zig");
 pub const socket = @import("https/socket.zig");
 /// Response framing (Content-Length, chunked) for callers that read raw HTTP themselves.
@@ -108,11 +109,18 @@ pub const Stream = struct {
     body: *std.Io.Reader,
 
     pub fn close(_: *Stream) void {
+        // Closing twice would delete the netconn twice.
+        verify(stream_open, "an HTTPS stream is closed once");
         conn_tcp.close();
+        stream_open = false;
     }
 };
 
 var conn_tcp: socket.Tcp = undefined;
+/// Between a successful `open` and its `close`. The connection's buffers, the TLS client and
+/// its key share are statics: a second `open` meanwhile (a token refresh while a stream is
+/// read, say) would silently overwrite the first connection's state.
+var stream_open = false;
 var conn_client: TlsClient = undefined;
 
 /// Sends one HTTPS request and reads the response head. `target` is the path and query;
@@ -135,8 +143,11 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
     }
 
     const addr = try socket.resolve(host);
+    verify(!stream_open, "one HTTPS connection at a time");
     try conn_tcp.connect(addr, 443, &socket_read, &socket_write, 10_000);
     errdefer conn_tcp.close();
+    stream_open = true;
+    errdefer stream_open = false;
 
     var entropy: [TlsClient.Options.entropy_len]u8 = undefined;
     microzig.hal.rng.read(&entropy);
@@ -169,10 +180,16 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
     try w.flush();
     try conn_tcp.writer.flush();
 
-    // The head, line by line (each fits the TLS read buffer).
-    const r = &conn_client.reader;
+    return read_head(&conn_client.reader);
+}
+
+/// The status line and the headers `open` needs, leaving `r` at the body. Line by line:
+/// each fits the TLS read buffer.
+fn read_head(r: *std.Io.Reader) !Stream {
+    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
     const status_line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
-    if (status_line.len < 12 or !std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadResponse;
+    const http_ok = status_line.len >= 12 and std.mem.startsWith(u8, status_line, "HTTP/1.");
+    if (!http_ok) return error.BadResponse;
     var stream: Stream = .{
         .status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return error.BadResponse,
         .content_length = null,
@@ -183,10 +200,12 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
         const line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
         if (line.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon];
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (std.ascii.eqlIgnoreCase(line[0..colon], "content-length")) {
-            stream.content_length = std.fmt.parseInt(usize, value, 10) catch return error.BadResponse;
-        } else if (std.ascii.eqlIgnoreCase(line[0..colon], "transfer-encoding")) {
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            stream.content_length = std.fmt.parseInt(usize, value, 10) catch
+                return error.BadResponse;
+        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
             if (std.ascii.findIgnoreCase(value, "chunked") != null) return error.ChunkedResponse;
         }
     } else return error.BadResponse; // more header lines than any real answer has

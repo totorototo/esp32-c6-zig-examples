@@ -147,3 +147,20 @@ test "chunk size that would overflow" {
     var too_long = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1" ++ size ++ "\r\nab\r\n0\r\n\r\n").*;
     try testing.expectError(error.BadResponse, body(&too_long, (try parse_head(&too_long)).?, false));
 }
+
+test "truncated and corrupted responses never panic" {
+    const mutations = @import("mutations");
+    for ([_][]const u8{
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n" ++
+            "{\"ok\":true}",
+        "HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\n\r\n" ++
+            "4\r\n{\"a\"\r\nb;ext=1\r\n:[1,2,3,4]}\r\n0\r\n\r\n",
+    }) |fixture| try mutations.each(fixture, struct {
+        fn check(input: []u8) void {
+            const head = (parse_head(input) catch return) orelse return;
+            _ = body(input, head, false) catch return;
+            // Decoding may have compacted `input`: run the end-of-connection case on that.
+            _ = body(input, head, true) catch return;
+        }
+    }.check);
+}

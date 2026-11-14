@@ -7,6 +7,7 @@ const esp = microzig.hal;
 const rtos = esp.rtos;
 
 const c = @import("include.zig").c;
+const verify = @import("verify").verify;
 
 const log = std.log.scoped(.lwip);
 
@@ -24,6 +25,9 @@ export fn sys_arch_protect() c.sys_prot_t {
 }
 
 export fn sys_arch_unprotect(was_enabled: c.sys_prot_t) void {
+    // Negative space: inside a protected section interrupts are off. If they're on here, a
+    // protect and an unprotect don't pair up, and lwIP's shared state is unguarded.
+    verify(!microzig.interrupt.globally_enabled(), "SYS_ARCH_UNPROTECT inside SYS_ARCH_PROTECT");
     if (was_enabled != 0) microzig.interrupt.enable_interrupts();
 }
 

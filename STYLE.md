@@ -36,6 +36,19 @@ covers its own scope, so helpers it calls need their own.
 back after every NVS write, and the boot sample checks memory layout from inside the image.
 Tests cover the rejected inputs as well as the accepted ones.
 
+**Assert the negative space: what must not happen, as well as what should.** Where a rule
+lives only in a comment or in the order of calls, make it a `verify`: `SYS_ARCH_UNPROTECT`
+runs with interrupts off (else protect/unprotect don't pair), one HTTPS connection at a time
+(its buffers and key share are statics), the settings store used by one task only (it has no
+lock). These cost nothing when the code is right, and turn a silent corruption into a named
+stop when it isn't.
+
+**Test inputs going from valid to invalid.** Every parser of outside bytes has a test that
+feeds `mutations.each` a valid fixture: every prefix, and every copy with one byte changed.
+It may return a value or an error, never panic. With runtime safety on, a panic there is a
+read out of bounds the board would hit on the same bytes. (Removing one bounds check from
+the mDNS parser makes this test fail at once.)
+
 **Handle every error.** No `catch {}`: log it, count it, or return it. `catch unreachable`
 only where the code proves it can't happen (a `bufPrint` into a buffer sized for the
 largest value), and `_ = f()` only for results with nothing useful to do (closing a socket

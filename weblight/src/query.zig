@@ -48,3 +48,12 @@ test "bad parameters" {
         try testing.expectError(error.BadParameter, parse(bad));
     }
 }
+
+test "truncated and corrupted queries never panic" {
+    const mutations = @import("mutations");
+    try mutations.each("on=1&r=255&g=128&b=0", struct {
+        fn check(input: []u8) void {
+            _ = parse(input) catch return;
+        }
+    }.check);
+}
