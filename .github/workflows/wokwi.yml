@@ -61,9 +61,10 @@ jobs:
             expect: "wifinvs test: PASS"
 
     steps:
-      - uses: actions/checkout@v5
+      # Actions pinned by commit: a tag can be moved to other code, a commit can't.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.1
 
@@ -74,14 +75,23 @@ jobs:
 
       - name: Host tests
         working-directory: ${{ matrix.sample }}
-        # Only samples with pure parts (hue's mDNS and JSON readers) have a test step.
+        # Samples with pure parts (hue, netatmo, tls and common's HTTP/SNTP/font code) have a test step.
         run: |
           if zig build -l | grep -q '^  test '; then zig build test --summary all; else echo "no host tests"; fi
 
       - name: Install wokwi-cli
         if: matrix.expect != '' && env.WOKWI_CLI_TOKEN != ''
+        # A fixed release, checked against its hash, rather than whatever install.sh fetches.
+        # To update: pick a release, download its linuxstatic-x64 binary, `sha256sum` it.
+        env:
+          WOKWI_CLI_VERSION: v0.29.1
+          WOKWI_CLI_SHA256: 3c9d6da007d008a3822ab468318037285440055132c59fd659d7306e40f14258
         run: |
-          curl -L https://wokwi.com/ci/install.sh | sh
+          mkdir -p "$HOME/.wokwi/bin"
+          curl -fsSL -o "$HOME/.wokwi/bin/wokwi-cli" \
+            "https://github.com/wokwi/wokwi-cli/releases/download/$WOKWI_CLI_VERSION/wokwi-cli-linuxstatic-x64"
+          echo "$WOKWI_CLI_SHA256  $HOME/.wokwi/bin/wokwi-cli" | sha256sum -c -
+          chmod +x "$HOME/.wokwi/bin/wokwi-cli"
           echo "$HOME/.wokwi/bin" >> "$GITHUB_PATH"
 
       - name: Simulate
