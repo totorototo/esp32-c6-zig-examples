@@ -260,7 +260,7 @@ fn render() void {
 
 fn mode_label(mode: []const u8) []const u8 {
     const labels = .{
-        .{ "schedule", "SCHEDULE" }, .{ "manual", "MANUAL" }, .{ "home", "SCHEDULE" },
+        .{ "schedule", "SCHEDULE" }, .{ "manual", "MANUAL" },  .{ "home", "SCHEDULE" },
         .{ "away", "AWAY" },         .{ "hg", "FROST GUARD" }, .{ "off", "OFF" },
         .{ "max", "MAX" },
     };

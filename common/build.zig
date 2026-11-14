@@ -46,16 +46,22 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     const uart_log = b.createModule(.{ .root_source_file = common.path("src/uart_log.zig") });
     fw.add_app_import("uart_log", uart_log, .{ .depend_on_microzig = true });
 
+    // An assertion that stays on in ReleaseSmall (see STYLE.md).
+    const verify = b.createModule(.{ .root_source_file = common.path("src/verify.zig") });
+    fw.add_app_import("verify", verify, .{});
+
     const net = b.createModule(.{ .root_source_file = common.path("src/net.zig") });
     net.addImport("lwip", lwip);
     net.addImport("config", opts.config);
     net.addImport("uart_log", uart_log);
+    net.addImport("verify", verify);
     fw.add_app_import("net", net, .{ .depend_on_microzig = true });
 
     // HTTPS on top of it (TLS 1.3, see src/https.zig for what the firmware must provide).
     // Only compiled into firmware that imports it.
     const https = b.createModule(.{ .root_source_file = common.path("src/https.zig") });
     https.addImport("net", net);
+    https.addImport("verify", verify);
     fw.add_app_import("https", https, .{ .depend_on_microzig = true });
     return true;
 }
@@ -68,7 +74,7 @@ pub fn add_screen(b: *std.Build, fw: anytype) void {
 }
 
 /// Host tests for an example's `test` step: every `.zig` file under its `src/` and under
-/// common's `src/` that holds a `test "..."` block.
+/// common's `src/` that holds a top-level `test` block.
 ///
 /// Found by scanning rather than listed, so a new test file can't be left out (a hand-kept
 /// list once missed one). Configure re-runs when a file or directory there changes, so a
@@ -84,8 +90,9 @@ pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
 
 fn add_tests_under(b: *std.Build, pkg: *std.Build, step: *std.Build.Step) void {
     const io = b.graph.io;
-    const root = pkg.root.root_dir.handle.openDir(io, if (pkg.root.sub_path.len == 0) "." else pkg.root.sub_path, .{}) catch |err|
-        std.debug.panic("opening {s}: {t}", .{ pkg.root.sub_path, err });
+    const root_path = if (pkg.root.sub_path.len == 0) "." else pkg.root.sub_path;
+    const root = pkg.root.root_dir.handle.openDir(io, root_path, .{}) catch |err|
+        std.debug.panic("opening {s}: {t}", .{ root_path, err });
     defer root.close(io);
     const src = root.openDir(io, "src", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -103,9 +110,13 @@ fn add_tests_under(b: *std.Build, pkg: *std.Build, step: *std.Build.Step) void {
             .file => {
                 if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
                 b.dependOnFileContents(pkg.path(sub_path));
-                const text = src.readFileAlloc(io, entry.path, b.allocator, .limited(1 << 20)) catch |err|
+                const limit: std.Io.Limit = .limited(1 << 20);
+                const text = src.readFileAlloc(io, entry.path, b.allocator, limit) catch |err|
                     std.debug.panic("reading {s}: {t}", .{ sub_path, err });
-                if (!std.mem.startsWith(u8, text, "test \"") and std.mem.indexOf(u8, text, "\ntest \"") == null) continue;
+                // Any top-level test: `test "name" {`, `test decl {` or `test {`.
+                const has_test = std.mem.startsWith(u8, text, "test ") or
+                    std.mem.indexOf(u8, text, "\ntest ") != null;
+                if (!has_test) continue;
                 for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSmall }) |mode| {
                     const t = b.addTest(.{
                         .name = b.fmt("{s}-{t}", .{ std.fs.path.stem(entry.basename), mode }),

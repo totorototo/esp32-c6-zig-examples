@@ -44,7 +44,11 @@ pub fn check_error(arena: std.mem.Allocator, body: []const u8, failure: ?*Failur
 
 /// The answer to `POST /api {"devicetype": ...}`: the new username, or null while the link
 /// button has not been pressed (error 101).
-pub fn pairing_user(arena: std.mem.Allocator, body: []const u8, failure: ?*Failure) Error!?[]const u8 {
+pub fn pairing_user(
+    arena: std.mem.Allocator,
+    body: []const u8,
+    failure: ?*Failure,
+) Error!?[]const u8 {
     const results = try parse([]Result, arena, body);
     if (results.len == 0) return error.BadResponse;
     if (results[0].@"error") |e| {
@@ -65,7 +69,8 @@ pub fn state_body(buf: []u8, change: Change) error{NoSpaceLeft}![]const u8 {
     var c = change;
     if (c.bri) |v| c.bri = std.math.clamp(v, 1, 254);
     if (c.sat) |v| c.sat = @min(v, 254);
-    return std.fmt.bufPrint(buf, "{f}", .{std.json.fmt(c, .{ .emit_null_optional_fields = false })});
+    const json = std.json.fmt(c, .{ .emit_null_optional_fields = false });
+    return std.fmt.bufPrint(buf, "{f}", .{json});
 }
 
 /// The web remote's `/set` query: `on=0|1`, `bri`, `hue`, `sat`, any subset.
@@ -98,8 +103,10 @@ fn parse_int(comptime T: type, s: []const u8) ?T {
 pub fn parse_ipv4(s: []const u8) error{BadAddress}![4]u8 {
     var octets: [4]u8 = undefined;
     var it = std.mem.splitScalar(u8, s, '.');
-    for (&octets) |*o| o.* = std.fmt.parseInt(u8, it.next() orelse return error.BadAddress, 10) catch
-        return error.BadAddress;
+    for (&octets) |*o| {
+        const part = it.next() orelse return error.BadAddress;
+        o.* = std.fmt.parseInt(u8, part, 10) catch return error.BadAddress;
+    }
     if (it.next() != null) return error.BadAddress;
     return octets;
 }
@@ -116,10 +123,14 @@ test "check_error: objects pass, error arrays fail" {
     try check_error(a, "", null);
     // Writes answer with an array of successes.
     try check_error(a, "[{\"success\":{\"/lights/1/state/on\":true}}]", null);
-    try testing.expectError(error.BridgeError, check_error(a, " \r\n[{\"error\":{\"type\":1,\"address\":\"/\",\"description\":\"unauthorized user\"}}]", null));
+    const unauthorized = " \r\n[{\"error\":{\"type\":1,\"address\":\"/\"," ++
+        "\"description\":\"unauthorized user\"}}]";
+    try testing.expectError(error.BridgeError, check_error(a, unauthorized, null));
     // Any error among successes fails the whole write, and says why.
+    const partly = "[{\"success\":{}}," ++
+        "{\"error\":{\"type\":201,\"description\":\"device is off\"}}]";
     var why: Failure = .{};
-    try testing.expectError(error.BridgeError, check_error(a, "[{\"success\":{}},{\"error\":{\"type\":201,\"description\":\"device is off\"}}]", &why));
+    try testing.expectError(error.BridgeError, check_error(a, partly, &why));
     try testing.expectEqual(@as(u32, 201), why.type);
     try testing.expectEqualStrings("device is off", why.description);
     try testing.expectError(error.BadResponse, check_error(a, "[{\"error\":", null));
@@ -129,28 +140,39 @@ test "pairing" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("83b7780291a6ceffbe0bd049104df", (try pairing_user(a, "[{\"success\":{\"username\":\"83b7780291a6ceffbe0bd049104df\"}}]", null)).?);
-    try testing.expectEqual(null, try pairing_user(a, "[{\"error\":{\"type\":101,\"address\":\"\",\"description\":\"link button not pressed\"}}]", null));
-    try testing.expectError(error.BridgeError, pairing_user(a, "[{\"error\":{\"type\":7,\"description\":\"invalid value\"}}]", null));
-    try testing.expectError(error.BadResponse, pairing_user(a, "[]", null));
-    try testing.expectError(error.BadResponse, pairing_user(a, "[{\"success\":{\"user\":\"x\"}}]", null));
-    try testing.expectError(error.BadResponse, pairing_user(a, "[{\"success\":\"x\"}]", null));
-    try testing.expectError(error.BadResponse, pairing_user(a, "[{\"success\":{\"username\":42}}]", null));
+    const user = "83b7780291a6ceffbe0bd049104df";
+    const paired = "[{\"success\":{\"username\":\"" ++ user ++ "\"}}]";
+    try testing.expectEqualStrings(user, (try pairing_user(a, paired, null)).?);
+    const not_pressed = "[{\"error\":{\"type\":101,\"address\":\"\"," ++
+        "\"description\":\"link button not pressed\"}}]";
+    try testing.expectEqual(null, try pairing_user(a, not_pressed, null));
+    const refused = "[{\"error\":{\"type\":7,\"description\":\"invalid value\"}}]";
+    try testing.expectError(error.BridgeError, pairing_user(a, refused, null));
+    for ([_][]const u8{
+        "[]",
+        "[{\"success\":{\"user\":\"x\"}}]",
+        "[{\"success\":\"x\"}]",
+        "[{\"success\":{\"username\":42}}]",
+    }) |bad| try testing.expectError(error.BadResponse, pairing_user(a, bad, null));
 }
 
 test "state body: nulls left out, out-of-range values clamped" {
     var buf: [80]u8 = undefined;
     try testing.expectEqualStrings("{\"on\":true}", try state_body(&buf, .{ .on = true }));
-    try testing.expectEqualStrings("{\"bri\":1,\"sat\":254}", try state_body(&buf, .{ .bri = 0, .sat = 255 }));
-    try testing.expectEqualStrings("{\"on\":false,\"bri\":254,\"hue\":65535,\"sat\":0}", try state_body(&buf, .{ .on = false, .bri = 255, .hue = 65535, .sat = 0 }));
+    const clamped = try state_body(&buf, .{ .bri = 0, .sat = 255 });
+    try testing.expectEqualStrings("{\"bri\":1,\"sat\":254}", clamped);
+    const largest: Change = .{ .on = false, .bri = 255, .hue = 65535, .sat = 0 };
+    const all = try state_body(&buf, largest);
+    try testing.expectEqualStrings("{\"on\":false,\"bri\":254,\"hue\":65535,\"sat\":0}", all);
     try testing.expectEqualStrings("{}", try state_body(&buf, .{}));
-    // The largest change still fits the 80-byte buffer hue.zig gives it.
+    // The largest change fits the 80-byte buffer hue.zig gives it, but not a tiny one.
     var small: [10]u8 = undefined;
-    try testing.expectError(error.NoSpaceLeft, state_body(&small, .{ .on = false, .bri = 255, .hue = 65535, .sat = 0 }));
+    try testing.expectError(error.NoSpaceLeft, state_body(&small, largest));
 }
 
 test "parse_change" {
-    try testing.expectEqualDeep(Change{ .on = true, .bri = 200, .hue = 8000, .sat = 254 }, try parse_change("on=1&bri=200&hue=8000&sat=254"));
+    const full: Change = .{ .on = true, .bri = 200, .hue = 8000, .sat = 254 };
+    try testing.expectEqualDeep(full, try parse_change("on=1&bri=200&hue=8000&sat=254"));
     try testing.expectEqualDeep(Change{ .on = false }, try parse_change("on=0"));
     try testing.expectEqualDeep(Change{}, try parse_change(""));
     try testing.expectError(error.BadParameter, parse_change("on=2")); // u1
@@ -164,7 +186,13 @@ test "parse_change" {
 test "parse_ipv4" {
     try testing.expectEqual([4]u8{ 192, 168, 1, 20 }, try parse_ipv4("192.168.1.20"));
     try testing.expectEqual([4]u8{ 0, 0, 0, 0 }, try parse_ipv4("0.0.0.0"));
-    for ([_][]const u8{ "", "192.168.1", "192.168.1.20.5", "192.168.1.256", "192.168..20", "a.b.c.d", "192.168.1.20 " }) |bad| {
-        try testing.expectError(error.BadAddress, parse_ipv4(bad));
-    }
+    for ([_][]const u8{
+        "",
+        "192.168.1",
+        "192.168.1.20.5",
+        "192.168.1.256",
+        "192.168..20",
+        "a.b.c.d",
+        "192.168.1.20 ",
+    }) |bad| try testing.expectError(error.BadAddress, parse_ipv4(bad));
 }

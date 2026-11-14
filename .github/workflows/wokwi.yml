@@ -16,6 +16,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  style:
+    # STYLE.md: zig fmt, and the limits tools/style_lint.zig measures (new violations only;
+    # older code is in tools/style_baseline.txt).
+    name: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: zig fmt
+        run: git ls-files '*.zig' | xargs zig fmt --check
+      - name: Lint tests
+        run: zig test tools/style_lint.zig
+      - name: Lint
+        run: git ls-files '*.zig' | xargs zig run tools/style_lint.zig --
+
   sample:
     name: ${{ matrix.sample }}
     runs-on: ubuntu-latest

@@ -86,6 +86,18 @@ var socket_write: [TlsClient.min_buffer_len]u8 = undefined;
 var tls_read: [TlsClient.min_buffer_len]u8 = undefined;
 var tls_write: [2048]u8 = undefined;
 var bundle_mem: [4096]u8 = undefined;
+comptime {
+    // The TLS client asks its output for a whole record of contiguous space, and asserts
+    // it only in Debug: a smaller buffer made the first encrypted write spin forever.
+    std.debug.assert(socket_write.len >= TlsClient.min_buffer_len);
+    std.debug.assert(socket_read.len >= TlsClient.min_buffer_len);
+    std.debug.assert(tls_read.len >= TlsClient.min_buffer_len);
+    // The bundle copies every root and keeps an index next to them: twice their size
+    // leaves room for the index.
+    var roots_len = 0;
+    for (roots) |der| roots_len += der.len;
+    std.debug.assert(bundle_mem.len >= 2 * roots_len);
+}
 
 /// The open response of `open`: status, a few headers, and the decrypted body as a reader.
 /// One at a time (the connection's buffers are statics); `close` it.
@@ -166,7 +178,8 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
         .content_length = null,
         .body = r,
     };
-    while (true) {
+    // A limit on everything: a server that never ends its head can't keep us here.
+    for (0..header_lines_max) |_| {
         const line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
         if (line.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
@@ -176,9 +189,12 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
         } else if (std.ascii.eqlIgnoreCase(line[0..colon], "transfer-encoding")) {
             if (std.ascii.findIgnoreCase(value, "chunked") != null) return error.ChunkedResponse;
         }
-    }
+    } else return error.BadResponse; // more header lines than any real answer has
     return stream;
 }
+
+/// Netatmo sends about 15.
+const header_lines_max = 64;
 
 /// One HTTPS request, the whole body read into `buf` (for small responses; stream bigger
 /// ones with `open`).

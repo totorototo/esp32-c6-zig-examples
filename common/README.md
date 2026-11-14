@@ -13,6 +13,8 @@ adds `screen` (ILI9341 + FT6206). The `net` module:
 - `net.exports`: the OS glue lwIP links against (`sys_now`, mutexes, mailboxes, semaphores,
   threads, on MicroZig's RTOS). Reference it from the firmware's root
   (`comptime { _ = net.exports; }`) so the symbols are exported.
+- `verify` (its own module): `verify(ok, "what")`, an assertion that stays in ReleaseSmall,
+  for invariants whose failure would corrupt memory (see STYLE.md).
 - `uart_log` (its own module): `.logFn = @import("uart_log").log` in `std_options`. Locks
   across tasks, and writes unlocked when interrupts are off (a trap, a panic), where waiting
   for the lock would freeze the board.

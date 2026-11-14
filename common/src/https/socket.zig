@@ -4,6 +4,7 @@
 const std = @import("std");
 const net = @import("net");
 const lwip = net.lwip;
+const verify = @import("verify").verify;
 
 const log = std.log.scoped(.socket);
 
@@ -91,6 +92,7 @@ pub const Tcp = struct {
         }
         const nb = t.pending.?;
         const total = nb.p.*.tot_len;
+        verify(t.pending_off < total, "a pending netbuf has bytes left");
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = lwip.c.pbuf_copy_partial(nb.p, dest.ptr, @intCast(@min(dest.len, total - t.pending_off)), t.pending_off);
         w.advance(n);

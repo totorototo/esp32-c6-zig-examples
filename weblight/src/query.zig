@@ -34,7 +34,8 @@ pub fn parse(query: []const u8) error{BadParameter}!Update {
 const testing = std.testing;
 
 test "any subset" {
-    try testing.expectEqualDeep(Update{ .on = true, .r = 255, .g = 128, .b = 0 }, try parse("on=1&r=255&g=128&b=0"));
+    const all: Update = .{ .on = true, .r = 255, .g = 128, .b = 0 };
+    try testing.expectEqualDeep(all, try parse("on=1&r=255&g=128&b=0"));
     try testing.expectEqualDeep(Update{ .g = 7 }, try parse("g=7"));
     try testing.expectEqualDeep(Update{ .on = false }, try parse("on=0"));
     try testing.expectEqualDeep(Update{}, try parse(""));

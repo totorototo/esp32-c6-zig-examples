@@ -53,10 +53,20 @@ pub fn set(key: Key, value: []const u8) bool {
         log.warn("saving {t} failed: {t}", .{ key, err });
         return false;
     };
+    // Checked on the way back too: the refresh token is the only valid one, and a write
+    // that went wrong unnoticed would only show at the next boot, as a lost login.
+    const stored = get(key, &buf) orelse "";
+    if (!std.mem.eql(u8, stored, value)) {
+        log.err("saving {t}: reads back different", .{key});
+        return false;
+    }
     return true;
 }
 
 pub fn erase(key: Key) void {
     const h = handle orelse return;
-    h.erase_key(@tagName(key)) catch {};
+    h.erase_key(@tagName(key)) catch |err| switch (err) {
+        error.NotFound => {},
+        else => log.warn("erasing {t} failed: {t}", .{ key, err }),
+    };
 }

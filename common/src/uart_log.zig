@@ -21,7 +21,8 @@ pub fn log(
     const locked = microzig.interrupt.globally_enabled();
     if (locked) mutex.lock();
     defer if (locked) mutex.unlock();
-    const prefix = comptime "[" ++ level.asText() ++ "] " ++ (if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ");
+    const scope_text = if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ";
+    const prefix = comptime "[" ++ level.asText() ++ "] " ++ scope_text;
     const line = std.fmt.bufPrint(&buf, prefix ++ format ++ "\r\n", args) catch return;
     hal.uart.write(0, line);
 }

@@ -96,6 +96,7 @@ pub fn main() !void {
     // Rotate the rainbow on the ring, and show its first colour on the on-board LED.
     var step: u8 = 0;
     var underruns: u32 = 0;
+    var led_failures: u32 = 0;
     while (true) : (step +%= 4) {
         for (&colors, 0..) |*color, i| color.* = wheel(step +% @as(u8, @intCast(i * 256 / ring_len)));
 
@@ -103,7 +104,10 @@ pub fn main() !void {
             underruns += 1;
             std.log.warn("ring underrun ({} so far)", .{underruns});
         };
-        led.write(colors[0..1]) catch {};
+        led.write(colors[0..1]) catch {
+            led_failures += 1;
+            std.log.warn("on-board LED write failed ({} so far)", .{led_failures});
+        };
 
         time.sleep_ms(40);
     }

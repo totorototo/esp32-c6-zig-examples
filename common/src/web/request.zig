@@ -19,7 +19,8 @@ pub const Request = struct {
         var lines = std.mem.splitSequence(u8, req.headers, "\r\n");
         while (lines.next()) |line| {
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-            if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
+            if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+            return std.mem.trim(u8, line[colon + 1 ..], " \t");
         }
         return null;
     }
@@ -57,7 +58,8 @@ pub fn split_param(pair: []const u8) ?struct { []const u8, []const u8 } {
 const testing = std.testing;
 
 test "request line, query, headers" {
-    const req = try parse("POST /set?on=1&bri=200 HTTP/1.1\r\nHost: 192.168.1.20\r\nx-hue-remote:  1 \r\nAccept: */*");
+    const req = try parse("POST /set?on=1&bri=200 HTTP/1.1\r\n" ++
+        "Host: 192.168.1.20\r\nx-hue-remote:  1 \r\nAccept: */*");
     try testing.expectEqualStrings("POST", req.method);
     try testing.expectEqualStrings("/set", req.path);
     try testing.expectEqualStrings("on=1&bri=200", req.query);

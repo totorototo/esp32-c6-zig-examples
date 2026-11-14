@@ -55,7 +55,14 @@ pub fn set(key: Key, value: []const u8) void {
     const h = handle orelse return;
     var buf: [64]u8 = undefined;
     if (get(key, &buf)) |old| if (std.mem.eql(u8, old, value)) return;
-    h.set_str(@tagName(key), value) catch |err| log.warn("saving {t} failed: {t}", .{ key, err });
+    h.set_str(@tagName(key), value) catch |err| {
+        log.warn("saving {t} failed: {t}", .{ key, err });
+        return;
+    };
+    // Checked on the way back too, so a bad write shows now rather than as a lost pairing
+    // at the next boot.
+    const stored = get(key, &buf) orelse "";
+    if (!std.mem.eql(u8, stored, value)) log.err("saving {t}: reads back different", .{key});
 }
 
 pub fn erase(key: Key) void {

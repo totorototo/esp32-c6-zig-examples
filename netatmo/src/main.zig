@@ -149,6 +149,9 @@ var access_buf: [128]u8 = undefined;
 var access_len: usize = 0;
 var access_expiry: i64 = 0;
 var auth_buf: [160]u8 = undefined;
+comptime {
+    std.debug.assert(auth_buf.len >= "Bearer ".len + access_buf.len);
+}
 var auth_header: [1]https.Header = undefined;
 
 fn auth_headers() ![]const https.Header {

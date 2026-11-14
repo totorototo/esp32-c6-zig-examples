@@ -1,5 +1,6 @@
 //! Minimal Philips Hue bridge client: local API v1 over plain HTTP (port 80).
 const std = @import("std");
+const microzig = @import("microzig");
 const net = @import("net");
 const lwip = net.lwip;
 const mdns = @import("mdns.zig");
@@ -137,7 +138,7 @@ pub fn discover(tries: u8) !?Bridge {
     try lwip.c_err(lwip.c.netconn_bind(conn, null, 0)); // any address, ephemeral port
     conn[0].recv_timeout = 1000;
 
-    var query_buf: [64]u8 = undefined;
+    var query_buf: [mdns.query_len]u8 = undefined;
     const query = mdns.build_query(&query_buf);
     const group = ip_addr(mdns.group);
 
@@ -149,8 +150,8 @@ pub fn discover(tries: u8) !?Bridge {
             try lwip.c_err(lwip.c.netconn_sendto(conn, out, &group, mdns.port));
         }
         // Other devices may answer too (they shouldn't for this name, but some do): keep
-        // reading until the timeout.
-        while (true) {
+        // reading until the timeout, or until a chatty network has sent `packets_max`.
+        for (0..packets_max) |_| {
             var in: ?*lwip.c.netbuf = null;
             lwip.c_err(lwip.c.netconn_recv(conn, &in)) catch |err| switch (err) {
                 error.Timeout => break,
@@ -171,6 +172,10 @@ pub fn discover(tries: u8) !?Bridge {
     }
     return null;
 }
+
+/// mDNS packets read per query before giving up on it: a busy LAN can keep the socket
+/// from ever timing out.
+const packets_max = 64;
 
 pub fn get_lights(arena: std.mem.Allocator, bridge: Bridge, user: []const u8) !std.json.ArrayHashMap(Light) {
     var path: [96]u8 = undefined;
@@ -298,8 +303,12 @@ fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u
     try write_all(conn, req);
     if (body.len > 0) try write_all(conn, body);
 
+    // `recv_timeout` bounds each read, not the whole answer: a bridge sending a byte every
+    // few seconds would hold the UI loop for hours without this.
+    const start_ms = now_ms();
     var len: usize = 0;
     while (true) {
+        if (now_ms() - start_ms >= response_timeout_ms) return error.Timeout;
         var nb: ?*lwip.c.netbuf = null;
         lwip.c_err(lwip.c.netconn_recv(conn, &nb)) catch |err| switch (err) {
             error.ConnectionClosed => break,
@@ -326,6 +335,13 @@ fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u
         return error.HttpStatus;
     }
     return resp[head_end + 4 ..];
+}
+
+/// The whole answer, however it trickles in. A real bridge takes well under a second.
+const response_timeout_ms = 10_000;
+
+fn now_ms() u64 {
+    return microzig.hal.time.get_time_since_boot().to_us() / 1000;
 }
 
 fn write_all(conn: *lwip.c.netconn, bytes: []const u8) !void {

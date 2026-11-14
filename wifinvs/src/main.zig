@@ -78,6 +78,26 @@ fn expect(ok: bool, comptime what: []const u8) void {
     std.log.err("check failed: " ++ what, .{});
 }
 
+/// Waits until the station reaches `state`, or fails after `timeout_ms`: a test that hangs
+/// says less than one that fails.
+fn wait_for(comptime state: wifi.StaState, timeout_ms: u64) error{WifiTimeout}!void {
+    const start = time_ms();
+    while (true) {
+        const now = wifi.get_sta_state();
+        const reached = if (state == .started) now.is_started() else now == state;
+        if (reached) return;
+        if (time_ms() - start >= timeout_ms) {
+            std.log.err("wifinvs test: FAIL (Wi-Fi not {t} after {} ms)", .{ state, timeout_ms });
+            return error.WifiTimeout;
+        }
+        rtos.sleep(.from_ms(100));
+    }
+}
+
+fn time_ms() u64 {
+    return hal.time.get_time_since_boot().to_us() / 1000;
+}
+
 fn log_calibration() ?radio.PhyCalibration {
     const cal = radio.phy_calibration() orelse {
         std.log.err("the PHY was not enabled", .{});
@@ -121,11 +141,11 @@ pub fn main() !void {
     if (boots == 1) {
         try wifi.apply(.{ .sta = .{ .ssid = ssid, .auth_method = .none } });
         try wifi.start();
-        while (!wifi.get_sta_state().is_started()) rtos.sleep(.from_ms(100));
+        try wait_for(.started, 5_000);
         const cal = log_calibration();
         expect(cal != null and cal.?.mode == .full and cal.?.saved, "boot 1 calibrates fully and saves");
         try wifi.connect();
-        while (wifi.get_sta_state() != .connected) rtos.sleep(.from_ms(100));
+        try wait_for(.connected, 30_000);
         std.log.info("connected to `{s}`", .{ssid});
 
         {
@@ -157,11 +177,11 @@ pub fn main() !void {
     // `wifi.init` resets the mode, so set it again; the saved station config stays.
     try wifi.set_mode(.sta);
     try wifi.start();
-    while (!wifi.get_sta_state().is_started()) rtos.sleep(.from_ms(100));
+    try wait_for(.started, 5_000);
     const cal = log_calibration();
     expect(cal != null and cal.?.mode == .partial and !cal.?.data_check_failed, "boot 2 reuses the calibration data");
     try wifi.connect();
-    while (wifi.get_sta_state() != .connected) rtos.sleep(.from_ms(100));
+    try wait_for(.connected, 30_000);
     std.log.info("connected again, from the saved config", .{});
 
     if (failures == 0) {

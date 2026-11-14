@@ -20,7 +20,11 @@ const class_in = 1;
 /// Top bit of a question's class: "unicast response requested".
 const class_qu = 0x8000;
 
-/// Writes the query into `buf` (at least 64 bytes) and returns it.
+/// The query's size: the header, the name as labels (one length byte per label, plus the
+/// final zero), then type and class.
+pub const query_len = 12 + (service.len + 2) + 4;
+
+/// Writes the query into `buf` (at least `query_len` bytes) and returns it.
 pub fn build_query(buf: []u8) []u8 {
     var w: Writer = .{ .buf = buf };
     w.u16be(query_id);
@@ -162,6 +166,9 @@ const testing = std.testing;
 test "query" {
     var buf: [64]u8 = undefined;
     const q = build_query(&buf);
+    try testing.expectEqual(query_len, q.len);
+    // One field per line, as in RFC 1035's diagrams.
+    // zig fmt: off
     try testing.expectEqualSlices(u8, &.{
         0x48, 0x55, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
         4,    '_',  'h', 'u', 'e',
@@ -171,6 +178,7 @@ test "query" {
         0,    12, // PTR
         0x80, 1, // QU, IN
     }, q);
+    // zig fmt: on
 }
 
 /// A legacy-unicast answer as a bridge sends it: the question echoed, a PTR to the instance,

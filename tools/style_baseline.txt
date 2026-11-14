@@ -1,0 +1,44 @@
+# Code from before STYLE.md, at its size then: `<kind> <path> [name] <size>`.
+# Rewritten by `zig run tools/style_lint.zig -- --update <files>`.
+columns blinky/src/main.zig 1
+columns boot/build.zig 3
+columns boot/src/main.zig 4
+fn common/src/https.zig open 71
+columns common/src/https.zig 7
+columns common/src/https/http.zig 8
+columns common/src/https/socket.zig 6
+columns common/src/lwip/exports.zig 2
+columns common/src/net.zig 5
+columns common/src/screen.zig 1
+columns common/src/screen/colour.zig 1
+columns common/src/screen/font.zig 2
+columns common/src/screen/ft6206.zig 1
+columns common/src/screen/ili9341.zig 5
+columns common/src/web.zig 3
+columns hue/build.zig 9
+columns hue/src/backlight.zig 1
+columns hue/src/catalog.zig 8
+columns hue/src/colourfield.zig 2
+columns hue/src/field.zig 23
+columns hue/src/hue.zig 22
+columns hue/src/list.zig 5
+fn hue/src/main.zig main 75
+fn hue/src/main.zig control 79
+columns hue/src/main.zig 22
+columns hue/src/ui.zig 15
+columns netatmo/build.zig 10
+columns netatmo/src/energy.zig 19
+columns netatmo/src/main.zig 16
+fn netatmo/src/thermo.zig render 81
+columns netatmo/src/thermo.zig 13
+fn nvs/src/main.zig main 75
+columns nvs/src/main.zig 4
+columns oled/src/font.zig 1
+columns oled/src/main.zig 9
+columns rmt/src/main.zig 2
+columns tls/build.zig 2
+columns tls/src/main.zig 1
+columns weblight/build.zig 2
+columns weblight/src/main.zig 7
+fn wifinvs/src/main.zig main 80
+columns wifinvs/src/main.zig 4

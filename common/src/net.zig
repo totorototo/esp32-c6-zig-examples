@@ -12,6 +12,7 @@ const radio = hal.radio;
 
 pub const exports = @import("lwip/exports.zig");
 const uart_log = @import("uart_log");
+const verify = @import("verify").verify;
 pub const lwip = @import("lwip/include.zig");
 pub const web = @import("web.zig");
 
@@ -90,7 +91,7 @@ pub fn up(gpa: std.mem.Allocator) !void {
     });
 
     try radio.wifi.start();
-    while (!radio.wifi.get_sta_state().is_started()) rtos.sleep(.from_ms(100));
+    try wait_started();
 
     log.info("connecting to `{s}`", .{config.ssid});
     try radio.wifi.connect();
@@ -101,6 +102,19 @@ pub fn up(gpa: std.mem.Allocator) !void {
     log.info("got address {f}", .{ip()});
 
     _ = try rtos.spawn(gpa, supervise, .{}, .{ .name = "wifi_supervisor" });
+}
+
+/// How long `start` may take before the driver counts as broken (it takes milliseconds).
+const start_timeout_ms = 5000;
+
+/// Waits for the station to report started: bounded, unlike `join`, because this one
+/// depends only on the driver, not on an access point that may still be booting.
+fn wait_started() error{WifiStartTimeout}!void {
+    const start = now_ms();
+    while (!radio.wifi.get_sta_state().is_started()) {
+        if (now_ms() - start >= start_timeout_ms) return error.WifiStartTimeout;
+        rtos.sleep(.from_ms(100));
+    }
 }
 
 /// Between connection attempts. The driver doesn't retry by itself: after a failed attempt
@@ -182,7 +196,7 @@ fn netif_init(netif_ptr: [*c]lwip.c.struct_netif) callconv(.c) lwip.c.err_t {
     n.linkoutput = netif_output;
     n.output = lwip.c.etharp_output;
     n.output_ip6 = lwip.c.ethip6_output;
-    n.mtu = 1500;
+    n.mtu = mtu;
     n.flags = lwip.c.NETIF_FLAG_BROADCAST | lwip.c.NETIF_FLAG_ETHARP | lwip.c.NETIF_FLAG_ETHERNET | lwip.c.NETIF_FLAG_IGMP | lwip.c.NETIF_FLAG_MLD6;
     @memcpy(&n.hwaddr, &radio.read_mac(.sta));
     n.hwaddr_len = 6;
@@ -193,11 +207,17 @@ fn netif_init(netif_ptr: [*c]lwip.c.struct_netif) callconv(.c) lwip.c.err_t {
     return lwip.c.ERR_OK;
 }
 
+const mtu = 1500;
+/// One Ethernet frame: the IP packet plus the 14-byte Ethernet header lwIP prepends.
 var packet_buf: [1600]u8 = undefined;
+comptime {
+    std.debug.assert(packet_buf.len >= mtu + 14);
+}
 
 fn netif_output(_: [*c]lwip.c.struct_netif, pbuf_c: [*c]lwip.c.struct_pbuf) callconv(.c) lwip.c.err_t {
     const pbuf: *lwip.c.struct_pbuf = pbuf_c;
-    std.debug.assert(pbuf.tot_len < packet_buf.len);
+    // lwIP never builds a frame over the MTU; if it did, the copy below would overrun.
+    verify(pbuf.tot_len <= packet_buf.len, "outgoing frame fits packet_buf");
 
     var off: usize = 0;
     while (off < pbuf.tot_len) {

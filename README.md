@@ -51,6 +51,11 @@ https://wokwi.com/dashboard/ci in `WOKWI_CLI_TOKEN`, e.g.
 `wokwi-cli --timeout 20000 --screenshot-part lcd1 --screenshot-time 19000 hue`. It simulates
 in Wokwi's cloud, so it can't reach devices on your network (the Hue bridge).
 
+Style: [STYLE.md](STYLE.md), TigerBeetle's TigerStyle adapted to this firmware (limits on
+every wait, compile-time checks on buffer sizes, `verify` for invariants that must hold in
+ReleaseSmall, 70-line functions, 100 columns). CI checks `zig fmt` and the measurable limits
+with `tools/style_lint.zig`.
+
 Host tests: `zig build test` in a sample runs the tests of its pure modules (parsers,
 protocol formats, colour and font code) and of `common`'s, each in Debug and in ReleaseSmall
 like the firmware. Files with tests are found by scanning `src/` (see `common.add_tests`), so

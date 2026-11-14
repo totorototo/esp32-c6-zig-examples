@@ -78,7 +78,7 @@ pub const Tab = enum {
     }
 
     fn rect(t: Tab) Rect {
-        return .{ .x = @as(u16, @intFromEnum(t)) * (lcd.width / 2), .y = 0, .w = lcd.width / 2, .h = top_h };
+        return .{ .x = @as(u16, @backingInt(t)) * (lcd.width / 2), .y = 0, .w = lcd.width / 2, .h = top_h };
     }
 };
 
