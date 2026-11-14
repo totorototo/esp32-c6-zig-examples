@@ -52,11 +52,6 @@ pub fn build(b: *std.Build) void {
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
 
-    const test_step = b.step("test", "Run the host tests");
-    common.add_tests(b, test_step);
-    const t = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/energy.zig"),
-        .target = b.graph.host,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(t).step);
+    // Host tests (the Energy API readers, common's pure parts), in Debug and ReleaseSmall.
+    common.add_tests(b, b.step("test", "Run the host tests"));
 }

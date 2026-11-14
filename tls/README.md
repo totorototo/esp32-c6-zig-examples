@@ -20,7 +20,7 @@ Logs go to UART0 (115200 baud) and end with `tls test: PASS` or `tls test: FAIL`
 ## Build and run
 
     zig build -Doptimize=ReleaseSmall
-    zig build test                      # host tests (SNTP, HTTP framing)
+    zig build test                      # host tests (common's: SNTP, HTTP, TLS records, ...)
 
 The HTTPS stack lives in `../common/src/https.zig` (shared with `netatmo`); this sample is
 its smallest user.

@@ -477,7 +477,7 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
         forget();
     }
     if (req.is("POST", "/set")) {
-        const change = parse_change(req.query) catch
+        const change = @import("protocol.zig").parse_change(req.query) catch
             return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
         const e = catalog.selected() orelse return no_selection(conn);
         if (!catalog.apply(ctx, e, change))
@@ -485,24 +485,6 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
         return respond_state(conn);
     }
     return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
-}
-
-fn parse_change(query: []const u8) !hue.Change {
-    var change: hue.Change = .{};
-    var it = web.params(query);
-    while (it.next()) |kv| {
-        const key, const value = web.split_param(kv) orelse return error.BadParameter;
-        if (std.mem.eql(u8, key, "on")) {
-            change.on = (try std.fmt.parseInt(u1, value, 10)) == 1;
-        } else if (std.mem.eql(u8, key, "bri")) {
-            change.bri = try std.fmt.parseInt(u8, value, 10);
-        } else if (std.mem.eql(u8, key, "hue")) {
-            change.hue = try std.fmt.parseInt(u16, value, 10);
-        } else if (std.mem.eql(u8, key, "sat")) {
-            change.sat = try std.fmt.parseInt(u8, value, 10);
-        } else return error.BadParameter;
-    }
-    return change;
 }
 
 fn no_selection(conn: *lwip.c.netconn) !void {

@@ -3,27 +3,10 @@ const std = @import("std");
 const net = @import("net.zig");
 const lwip = net.lwip;
 
-pub const Request = struct {
-    method: []const u8,
-    path: []const u8,
-    query: []const u8,
-    /// The header lines, after the request line.
-    headers: []const u8,
-
-    pub fn is(req: Request, method: []const u8, path: []const u8) bool {
-        return std.mem.eql(u8, req.method, method) and std.mem.eql(u8, req.path, path);
-    }
-
-    /// The value of header `name` (case-insensitive), or null.
-    pub fn header(req: Request, name: []const u8) ?[]const u8 {
-        var lines = std.mem.splitSequence(u8, req.headers, "\r\n");
-        while (lines.next()) |line| {
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-            if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
-        }
-        return null;
-    }
-};
+const request = @import("web/request.zig");
+pub const Request = request.Request;
+pub const params = request.params;
+pub const split_param = request.split_param;
 
 pub const Timeouts = struct {
     /// For the first bytes. Browsers open speculative connections that send nothing; on a
@@ -58,28 +41,7 @@ pub fn read_request(conn: *lwip.c.netconn, buf: []u8, timeouts: Timeouts) !Reque
         }
     }
 
-    const head = buf[0 .. std.mem.indexOf(u8, buf[0..len], "\r\n\r\n").?];
-    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
-    var it = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
-    const method = it.next() orelse return error.BadRequest;
-    const target = it.next() orelse return error.BadRequest;
-    const q = std.mem.indexOfScalar(u8, target, '?');
-    return .{
-        .method = method,
-        .path = target[0 .. q orelse target.len],
-        .query = if (q) |i| target[i + 1 ..] else "",
-        .headers = if (line_end < head.len) head[line_end + 2 ..] else "",
-    };
-}
-
-/// Iterates `key=value` pairs of a query string (no percent-decoding: values are numbers).
-pub fn params(query: []const u8) std.mem.TokenIterator(u8, .scalar) {
-    return std.mem.tokenizeScalar(u8, query, '&');
-}
-
-pub fn split_param(pair: []const u8) ?struct { []const u8, []const u8 } {
-    const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return null;
-    return .{ pair[0..eq], pair[eq + 1 ..] };
+    return request.parse(buf[0..std.mem.indexOf(u8, buf[0..len], "\r\n\r\n").?]);
 }
 
 pub fn respond(conn: *lwip.c.netconn, status: []const u8, content_type: []const u8, body: []const u8) !void {

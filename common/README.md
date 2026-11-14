@@ -29,3 +29,11 @@ From an example's `build.zig`:
 
 with `.common = .{ .path = "../common" }` in its `build.zig.zon`. `lwip_include_dir` swaps in
 another `lwipopts.h` for one example.
+
+For host tests:
+
+    common.add_tests(b, b.step("test", "Run the host tests"));
+
+runs every file with a `test "..."` block under the example's `src/` and common's `src/`,
+in Debug and ReleaseSmall. They're found by scanning, so keep tests in pure modules (no
+`microzig`, no `net`): `web/request.zig` next to `web.zig` is the pattern.

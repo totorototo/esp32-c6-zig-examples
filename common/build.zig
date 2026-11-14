@@ -67,15 +67,58 @@ pub fn add_screen(b: *std.Build, fw: anytype) void {
     fw.add_app_import("screen", screen, .{ .depend_on_microzig = true });
 }
 
-/// Host tests of common's pure parts (HTTP framing, SNTP, UTF-8 font folding, colour
-/// conversions), for an example's `test` step.
+/// Host tests for an example's `test` step: every `.zig` file under its `src/` and under
+/// common's `src/` that holds a `test "..."` block.
+///
+/// Found by scanning rather than listed, so a new test file can't be left out (a hand-kept
+/// list once missed one). Configure re-runs when a file or directory there changes, so a
+/// test added later is picked up too. A file with tests must therefore compile on the host
+/// on its own: keep tests in pure modules.
+///
+/// Each file runs twice: in Debug, and in ReleaseSmall like the firmware, where asserts are
+/// gone and only `@setRuntimeSafety(true)` code keeps its checks.
 pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
-    const common = b.dependency("common", .{});
-    for ([_][]const u8{ "src/https/http.zig", "src/https/sntp.zig", "src/screen/font.zig", "src/screen/colour.zig" }) |file| {
-        const t = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = common.path(file),
-            .target = b.graph.host,
-        }) });
-        step.dependOn(&b.addRunArtifact(t).step);
+    add_tests_under(b, b, step);
+    add_tests_under(b, b.dependency("common", .{}).builder, step);
+}
+
+fn add_tests_under(b: *std.Build, pkg: *std.Build, step: *std.Build.Step) void {
+    const io = b.graph.io;
+    const root = pkg.root.root_dir.handle.openDir(io, if (pkg.root.sub_path.len == 0) "." else pkg.root.sub_path, .{}) catch |err|
+        std.debug.panic("opening {s}: {t}", .{ pkg.root.sub_path, err });
+    defer root.close(io);
+    const src = root.openDir(io, "src", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => std.debug.panic("opening src/: {t}", .{err}),
+    };
+    defer src.close(io);
+    b.dependOnDirectoryContents(pkg.path("src"));
+
+    var walker = src.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch |err| std.debug.panic("listing src/: {t}", .{err})) |entry| {
+        const sub_path = b.fmt("src/{s}", .{entry.path});
+        switch (entry.kind) {
+            .directory => b.dependOnDirectoryContents(pkg.path(sub_path)),
+            .file => {
+                if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+                b.dependOnFileContents(pkg.path(sub_path));
+                const text = src.readFileAlloc(io, entry.path, b.allocator, .limited(1 << 20)) catch |err|
+                    std.debug.panic("reading {s}: {t}", .{ sub_path, err });
+                if (!std.mem.startsWith(u8, text, "test \"") and std.mem.indexOf(u8, text, "\ntest \"") == null) continue;
+                for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSmall }) |mode| {
+                    const t = b.addTest(.{
+                        .name = b.fmt("{s}-{t}", .{ std.fs.path.stem(entry.basename), mode }),
+                        .root_module = b.createModule(.{
+                            .root_source_file = pkg.path(sub_path),
+                            .target = b.graph.host,
+                            .optimize = mode,
+                        }),
+                    });
+                    step.dependOn(&b.addRunArtifact(t).step);
+                }
+            },
+            else => {},
+        }
     }
 }

@@ -33,7 +33,7 @@ never in the source, and don't paste them anywhere.
     zig build -Doptimize=ReleaseSmall \
         -Dnetatmo_client_id='<id>' -Dnetatmo_client_secret='<secret>' \
         -Dnetatmo_refresh_token='<refresh token>'
-    zig build test      # host tests: Netatmo parsers, HTTP framing, SNTP
+    zig build test      # host tests: Netatmo parsers + common's, in Debug and ReleaseSmall
 
 Keep the single quotes: Netatmo tokens contain `|`, which an unquoted shell command treats as
 a pipe. The token gets cut there, and Netatmo answers `invalid_grant`.

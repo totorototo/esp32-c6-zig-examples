@@ -137,7 +137,13 @@ test "bad heads" {
 }
 
 test "chunk size that would overflow" {
-    var buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nab\r\n0\r\n\r\n".*;
+    // Just under usize's maximum, so `in + size` overflows whatever usize's width: on the
+    // C6 it is 32 bits, on the host 64.
+    const size = std.fmt.comptimePrint("{x}", .{std.math.maxInt(usize) - 1});
+    var buf = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++ size ++ "\r\nab\r\n0\r\n\r\n").*;
     const head = (try parse_head(&buf)).?;
     try testing.expectError(error.BadResponse, body(&buf, head, false));
+    // One digit more than usize holds: rejected by the size parser itself.
+    var too_long = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1" ++ size ++ "\r\nab\r\n0\r\n\r\n").*;
+    try testing.expectError(error.BadResponse, body(&too_long, (try parse_head(&too_long)).?, false));
 }

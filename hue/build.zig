@@ -53,15 +53,7 @@ pub fn build(b: *std.Build) void {
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
 
-    // The pure parts (mDNS packets, the scenes JSON, UTF-8 folding) run on the host:
-    // `zig build test`.
-    const test_step = b.step("test", "Run the host tests");
-    common.add_tests(b, test_step);
-    for ([_][]const u8{ "src/mdns.zig", "src/scenes.zig" }) |file| {
-        const t = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path(file),
-            .target = b.graph.host,
-        }) });
-        test_step.dependOn(&b.addRunArtifact(t).step);
-    }
+    // The pure parts (mDNS packets, the bridge's JSON, UTF-8 folding, ...) run on the host,
+    // in Debug and ReleaseSmall: `zig build test`. Every src/ file with tests is found.
+    common.add_tests(b, b.step("test", "Run the host tests"));
 }

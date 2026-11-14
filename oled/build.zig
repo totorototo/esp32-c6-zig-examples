@@ -22,4 +22,15 @@ pub fn build(b: *std.Build) void {
     mb.install_firmware(fw, .{});
     // zig-out/firmware/oled.elf: for espflash, Wokwi and debugging
     mb.install_firmware(fw, .{ .format = .elf });
+
+    // The font runs on the host, in Debug and in ReleaseSmall like the firmware.
+    const test_step = b.step("test", "Run the host tests");
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSmall }) |mode| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/font.zig"),
+            .target = b.graph.host,
+            .optimize = mode,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 }

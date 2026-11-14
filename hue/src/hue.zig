@@ -4,6 +4,7 @@ const net = @import("net");
 const lwip = net.lwip;
 const mdns = @import("mdns.zig");
 const scenes = @import("scenes.zig");
+const protocol = @import("protocol.zig");
 const colour = @import("screen").colour;
 
 const log = std.log.scoped(.hue);
@@ -14,7 +15,7 @@ pub const Bridge = struct {
     host_len: u8,
 
     pub fn init(ip: []const u8) !Bridge {
-        return from_octets(try parse_ipv4(ip));
+        return from_octets(try protocol.parse_ipv4(ip));
     }
 
     pub fn from_octets(octets: [4]u8) Bridge {
@@ -79,19 +80,27 @@ pub const Kind = enum { light, group };
 /// What a read or a change applies to: one light, or a whole room or zone.
 pub const Target = struct { kind: Kind, id: []const u8 };
 
-/// A state change; null fields are left alone.
-pub const Change = struct {
-    on: ?bool = null,
-    bri: ?u8 = null,
-    hue: ?u16 = null,
-    sat: ?u8 = null,
-};
+pub const Change = protocol.Change;
 
-/// One entry of the array the bridge returns for writes and for errors.
-const Result = struct {
-    success: ?std.json.Value = null,
-    @"error": ?struct { type: u32, description: []const u8 } = null,
-};
+/// `protocol.parse`, logging what didn't parse.
+fn parse(comptime T: type, arena: std.mem.Allocator, body: []const u8) !T {
+    return protocol.parse(T, arena, body) catch |err| {
+        log.err("unexpected JSON: {s}", .{body[0..@min(body.len, 160)]});
+        return err;
+    };
+}
+
+/// `protocol.check_error`, logging the bridge's reason.
+fn check_error(arena: std.mem.Allocator, body: []const u8) !void {
+    var why: protocol.Failure = .{};
+    protocol.check_error(arena, body, &why) catch |err| {
+        switch (err) {
+            error.BridgeError => log.err("bridge error: {s} (type {})", .{ why.description, why.type }),
+            error.BadResponse => log.err("unexpected JSON: {s}", .{body[0..@min(body.len, 160)]}),
+        }
+        return err;
+    };
+}
 
 pub const Error = error{ BridgeError, HttpStatus, BadResponse };
 
@@ -108,17 +117,14 @@ pub fn get_config(arena: std.mem.Allocator, bridge: Bridge) !Config {
 pub fn create_user(arena: std.mem.Allocator, bridge: Bridge, devicetype: []const u8) !?[]const u8 {
     var req: [64]u8 = undefined;
     const body = try request(bridge, "POST", "/api", try std.fmt.bufPrint(&req, "{{\"devicetype\":\"{s}\"}}", .{devicetype}));
-    const results = try parse([]Result, arena, body);
-    if (results.len == 0) return error.BadResponse;
-    if (results[0].@"error") |e| {
-        if (e.type == 101) return null; // link button not pressed
-        log.err("pairing failed: {s} (type {})", .{ e.description, e.type });
-        return error.BridgeError;
-    }
-    const success = results[0].success orelse return error.BadResponse;
-    const user = success.object.get("username") orelse return error.BadResponse;
-    if (user != .string) return error.BadResponse;
-    return user.string;
+    var why: protocol.Failure = .{};
+    return protocol.pairing_user(arena, body, &why) catch |err| {
+        switch (err) {
+            error.BridgeError => log.err("pairing failed: {s} (type {})", .{ why.description, why.type }),
+            error.BadResponse => log.err("unexpected pairing answer: {s}", .{body[0..@min(body.len, 160)]}),
+        }
+        return err;
+    };
 }
 
 /// Asks the LAN for a Hue bridge over mDNS (see mdns.zig) and returns the first one that
@@ -262,13 +268,8 @@ pub fn recall_scene(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, 
 pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, target: Target, change: Change) !void {
     if (std.meta.eql(change, Change{})) return; // nothing to change
 
-    // The bridge rejects bri 0 and bri/sat 255.
-    var c = change;
-    if (c.bri) |v| c.bri = std.math.clamp(v, 1, 254);
-    if (c.sat) |v| c.sat = @min(v, 254);
-
     var json_buf: [80]u8 = undefined;
-    const json = try std.fmt.bufPrint(&json_buf, "{f}", .{std.json.fmt(c, .{ .emit_null_optional_fields = false })});
+    const json = try protocol.state_body(&json_buf, change);
 
     var path: [128]u8 = undefined;
     const url = switch (target.kind) {
@@ -277,25 +278,6 @@ pub fn set_state(arena: std.mem.Allocator, bridge: Bridge, user: []const u8, tar
     };
     const body = try request(bridge, "PUT", url, json);
     try check_error(arena, body);
-}
-
-/// Reads go back as an object, but failures (e.g. an unknown username) come back as an
-/// array of `{"error": ...}`, still with HTTP 200.
-fn check_error(arena: std.mem.Allocator, body: []const u8) !void {
-    const trimmed = std.mem.trimStart(u8, body, " \r\n\t");
-    if (trimmed.len == 0 or trimmed[0] != '[') return;
-    const results = try parse([]Result, arena, trimmed);
-    for (results) |r| if (r.@"error") |e| {
-        log.err("bridge error: {s} (type {})", .{ e.description, e.type });
-        return error.BridgeError;
-    };
-}
-
-fn parse(comptime T: type, arena: std.mem.Allocator, body: []const u8) !T {
-    return std.json.parseFromSliceLeaky(T, arena, body, .{ .ignore_unknown_fields = true }) catch |err| {
-        log.err("unexpected JSON ({t}): {s}", .{ err, body[0..@min(body.len, 160)] });
-        return error.BadResponse;
-    };
 }
 
 /// One HTTP exchange; returns the response body (valid until the next request).
@@ -348,14 +330,6 @@ fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u
 
 fn write_all(conn: *lwip.c.netconn, bytes: []const u8) !void {
     try lwip.c_err(lwip.c.netconn_write_partly(conn, bytes.ptr, bytes.len, lwip.c.NETCONN_COPY, null));
-}
-
-fn parse_ipv4(s: []const u8) ![4]u8 {
-    var octets: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, s, '.');
-    for (&octets) |*o| o.* = try std.fmt.parseInt(u8, it.next() orelse return error.BadAddress, 10);
-    if (it.next() != null) return error.BadAddress;
-    return octets;
 }
 
 fn ip_addr(octets: [4]u8) lwip.c.ip_addr_t {

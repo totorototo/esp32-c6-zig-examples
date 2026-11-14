@@ -51,6 +51,11 @@ https://wokwi.com/dashboard/ci in `WOKWI_CLI_TOKEN`, e.g.
 `wokwi-cli --timeout 20000 --screenshot-part lcd1 --screenshot-time 19000 hue`. It simulates
 in Wokwi's cloud, so it can't reach devices on your network (the Hue bridge).
 
+Host tests: `zig build test` in a sample runs the tests of its pure modules (parsers,
+protocol formats, colour and font code) and of `common`'s, each in Debug and in ReleaseSmall
+like the firmware. Files with tests are found by scanning `src/` (see `common.add_tests`), so
+a new one needs no build change; it must compile on the host on its own.
+
 CI: `.github/workflows/wokwi.yml` builds every sample on each push and pull request, and runs
 each one in Wokwi until it prints its success line (`<name> test: PASS` for the test samples).
 `blinky` is build-only (its log goes to USB-Serial-JTAG). Simulation needs a

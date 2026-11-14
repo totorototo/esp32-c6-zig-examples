@@ -32,4 +32,7 @@ pub fn build(b: *std.Build) void {
 
     mb.install_firmware(fw, .{});
     mb.install_firmware(fw, .{ .format = .elf });
+
+    // Host tests (the /set query, common's pure parts), in Debug and ReleaseSmall.
+    common.add_tests(b, b.step("test", "Run the host tests"));
 }

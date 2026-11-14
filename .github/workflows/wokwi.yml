@@ -75,7 +75,8 @@ jobs:
 
       - name: Host tests
         working-directory: ${{ matrix.sample }}
-        # Samples with pure parts (hue, netatmo, tls and common's HTTP/SNTP/font code) have a test step.
+        # Samples with pure parts (hue, netatmo, tls, weblight, oled) have a test step; each
+        # runs its own and common's tests, in Debug and in ReleaseSmall.
         run: |
           if zig build -l | grep -q '^  test '; then zig build test --summary all; else echo "no host tests"; fi
 

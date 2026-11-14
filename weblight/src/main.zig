@@ -10,6 +10,7 @@ const microzig = @import("microzig");
 const net = @import("net");
 const lwip = net.lwip;
 const web = net.web;
+const query = @import("query.zig");
 
 const hal = microzig.hal;
 const gpio = hal.gpio;
@@ -110,22 +111,13 @@ fn serve(conn: *lwip.c.netconn) !void {
     return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
 }
 
-fn update_state(query: []const u8) !void {
+fn update_state(q: []const u8) !void {
+    const u = try query.parse(q);
     var next = state;
-    var it = web.params(query);
-    while (it.next()) |pair| {
-        const key, const raw = web.split_param(pair) orelse return error.BadParameter;
-        const value = try std.fmt.parseInt(u8, raw, 10);
-        if (std.mem.eql(u8, key, "on")) {
-            next.on = value != 0;
-        } else if (std.mem.eql(u8, key, "r")) {
-            next.color.r = value;
-        } else if (std.mem.eql(u8, key, "g")) {
-            next.color.g = value;
-        } else if (std.mem.eql(u8, key, "b")) {
-            next.color.b = value;
-        } else return error.BadParameter;
-    }
+    if (u.on) |on| next.on = on;
+    if (u.r) |r| next.color.r = r;
+    if (u.g) |g| next.color.g = g;
+    if (u.b) |b| next.color.b = b;
     state = next;
 }
 

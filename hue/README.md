@@ -115,7 +115,7 @@ axes in `src/ft6206.zig` `read`.
 
     zig build -Doptimize=ReleaseSmall                       # find, pair, remember
     zig build -Doptimize=ReleaseSmall -Dhue_ip=192.168.1.20 # skip the search
-    zig build test                                          # host tests (mDNS, scenes JSON)
+    zig build test                                          # host tests (mDNS, scenes, bridge API, common's)
 
 Options:
 - `-Dhue_ip=`, `-Dhue_user=`: win over what is saved (and get saved).
