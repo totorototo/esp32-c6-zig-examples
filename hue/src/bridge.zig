@@ -254,8 +254,11 @@ fn read_list(a: std.mem.Allocator, ctx: Context, kind: hue.Kind, fresh: *catalog
             while (it.next()) |kv| {
                 const g = kv.value_ptr.*;
                 if (!std.mem.eql(u8, g.type, "Room") and !std.mem.eql(u8, g.type, "Zone")) continue;
+                const before = fresh.len;
                 catalog.add(fresh, .group, kv.key_ptr.*, g.name, g.as_light().state);
-                if (fresh.len > 0) fresh.items[fresh.len - 1].set_members(g.lights);
+                // Only if it was added: `add` skips a group when the list is full, and the
+                // last entry is then another room, whose members this would overwrite.
+                if (fresh.len > before) fresh.items[fresh.len - 1].set_members(g.lights);
             }
         },
     }

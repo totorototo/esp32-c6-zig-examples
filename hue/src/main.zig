@@ -557,8 +557,11 @@ fn ask(q: Ask) error{Timeout}!Answer {
     const seq = web_seq;
     try asks.put_one(.{ .seq = seq, .ask = q }, .{ .after = .from_ms(1000) });
     const start = now_ms();
-    while (now_ms() - start < timeout_ms) {
-        const left: u32 = @intCast(timeout_ms - (now_ms() - start));
+    while (true) {
+        // One reading of the clock: two could straddle the limit, and `left` underflow.
+        const waited = now_ms() - start;
+        if (waited >= timeout_ms) break;
+        const left: u32 = @intCast(timeout_ms - waited);
         const r = try answers.get_one(.{ .after = .from_ms(left) });
         if (r.seq == seq) return r.answer;
         // A late answer to a question already given up on.
