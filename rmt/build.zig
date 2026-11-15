@@ -1,5 +1,6 @@
 const std = @import("std");
 const microzig = @import("microzig");
+const common = @import("common");
 
 const MicroBuild = microzig.MicroBuild(.{
     .esp = true,
@@ -24,6 +25,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
     });
     fw.exe.root_module.addImport("config", options.createModule());
+    // The UART0 logger and the chip reset, shared with the other samples (../common).
+    _ = common.add_base(b, fw);
 
     // zig-out/firmware/rmt.bin: ESP image, flashable after the ESP-IDF 2nd stage bootloader
     mb.install_firmware(fw, .{});

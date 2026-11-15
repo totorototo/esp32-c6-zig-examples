@@ -19,12 +19,13 @@ Small firmware projects for the ESP32-C6-DevKitC-1, written in Zig on top of
 
 Each directory is its own Zig package: `cd` into it and follow its README.
 
-[`common`](common) is not an example: it holds the code the Wi-Fi samples (`weblight`, `hue`,
-`tls`, `netatmo`) share: Wi-Fi bring-up and reconnection, lwIP's OS glue and `lwipopts.h`,
-small HTTP helpers, the HTTPS client, the UART logger, and the touch screen drivers. They
-depend on it by path and call `common.add_net(...)` (and `add_screen`) from their `build.zig`,
-which builds lwIP and adds the `net`, `https`, `uart_log` and `screen` modules to the
-firmware. To copy one of them out of this repo, take `common/` along.
+[`common`](common) is not an example: it holds the code the samples share. Every sample but
+`blinky` (which logs over USB-Serial-JTAG) gets the UART logger, `verify` and the chip reset
+from `common.add_base`. The Wi-Fi samples (`weblight`, `hue`, `tls`, `netatmo`) also call
+`common.add_net`: Wi-Fi bring-up and reconnection, lwIP's OS glue and `lwipopts.h`, small
+HTTP helpers, the HTTPS client and the NVS settings store (`net`, `https`, `settings`). The
+screen samples add `common.add_screen` (drivers, text, backlight). They depend on it by path;
+to copy one of them out of this repo, take `common/` along.
 
 ## Requirements
 
@@ -71,8 +72,9 @@ locally with `.github/scripts/wokwi-run.sh <sample> <timeout ms> "<expected text
 
 Upstream MicroZig doesn't support the ESP32-C6 yet. These examples build against the
 `esp32-c6` branch of [totorototo/microzig](https://github.com/totorototo/microzig), a fork
-kept as one branch rebased on upstream `main`. Each `build.zig.zon` pins a commit of it, so a
-build fetches exactly that commit:
+kept as one branch rebased on upstream `main`. Every `build.zig.zon` pins the same commit of it, so a
+build fetches exactly that commit (keep them equal: a sample on an older commit tests a
+different driver than the one the others ship):
 
     .microzig = .{
         .url = "git+https://github.com/totorototo/microzig#<commit>",

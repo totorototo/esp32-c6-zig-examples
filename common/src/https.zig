@@ -144,7 +144,12 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
 
     const addr = try socket.resolve(host);
     verify(!stream_open, "one HTTPS connection at a time");
-    try conn_tcp.connect(addr, 443, &socket_read, &socket_write, 10_000);
+    try conn_tcp.connect(addr, 443, &socket_read, &socket_write, .{
+        .read_ms = 10_000,
+        // A handshake takes about a second on the chip, ~9 s in Wokwi, and the biggest
+        // answer (Netatmo's homesdata, tens of KiB) a few more: a minute is generous.
+        .total_ms = 60_000,
+    });
     errdefer conn_tcp.close();
     stream_open = true;
     errdefer stream_open = false;

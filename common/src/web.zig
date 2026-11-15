@@ -44,6 +44,18 @@ pub fn read_request(conn: *lwip.c.netconn, buf: []u8, timeouts: Timeouts) !Reque
     return request.parse(buf[0..std.mem.indexOf(u8, buf[0..len], "\r\n\r\n").?]);
 }
 
+/// Refuses a POST without header `name` (any value) with a 403, and returns true if it did.
+///
+/// Any web page the user has open can make their browser send a bodiless POST to the board:
+/// there is no CORS preflight for those. A custom header makes the browser ask first, and
+/// these servers never say yes, so only their own page (same origin) and `curl -H` get
+/// through.
+pub fn refuse_cross_site(conn: *lwip.c.netconn, req: Request, comptime name: []const u8) !bool {
+    if (!std.mem.eql(u8, req.method, "POST") or req.header(name) != null) return false;
+    try respond(conn, "403 Forbidden", "text/plain", "missing the " ++ name ++ " header\n");
+    return true;
+}
+
 pub fn respond(conn: *lwip.c.netconn, status: []const u8, content_type: []const u8, body: []const u8) !void {
     var head: [160]u8 = undefined;
     const header = try std.fmt.bufPrint(&head, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len });

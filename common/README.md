@@ -1,6 +1,8 @@
-# common — code shared by the Wi-Fi samples (`weblight`, `hue`, `tls`, `netatmo`)
+# common — code shared by the samples
 
-Not an example on its own. `add_net` adds the `net`, `https` and `uart_log` modules; `add_screen`
+Not an example on its own. `add_base` adds `uart_log`, `verify` and `system` (`reset()`, the
+whole chip) to any sample; `add_net` calls it and adds the Wi-Fi samples' (`weblight`, `hue`,
+`tls`, `netatmo`) `net`, `https` and `settings` modules; `add_screen`
 adds `screen` (ILI9341 + FT6206, and `screen.backlight`, PWM on GPIO3). The `net` module:
 
 - `net.up(allocator)`: joins the Wi-Fi network from the example's `config` (`ssid`,
@@ -8,8 +10,10 @@ adds `screen` (ILI9341 + FT6206, and `screen.backlight`, PWM on GPIO3). The `net
   access point answers, and leaves a task behind that reconnects whenever the link drops.
 - `net.lwip`: lwIP's C API (`net.lwip.c`) and `c_err` to turn its error codes into Zig errors.
 - `net.web`: one-request-per-connection HTTP helpers (`read_request`, `params`,
-  `split_param`, `respond`). `read_request` gives a client 150 ms to start sending, so an
-  idle browser connection can't stall a single-task server.
+  `split_param`, `respond`, `refuse_cross_site`). `read_request` gives a client 150 ms to
+  start sending, so an idle browser connection can't stall a single-task server.
+  `refuse_cross_site` answers 403 to a POST without the sample's custom header, so other
+  web pages open in the browser can't reach the board.
 - `net.exports`: the OS glue lwIP links against (`sys_now`, mutexes, mailboxes, semaphores,
   threads, on MicroZig's RTOS). Reference it from the firmware's root
   (`comptime { _ = net.exports; }`) so the symbols are exported.
@@ -20,9 +24,12 @@ adds `screen` (ILI9341 + FT6206, and `screen.backlight`, PWM on GPIO3). The `net
   back); one task only, checked with `verify`. `hue` and `netatmo` each wrap one.
 - `uart_log` (its own module): `.logFn = @import("uart_log").log` in `std_options`. Locks
   across tasks, and writes unlocked when interrupts are off (a trap, a panic), where waiting
-  for the lock would freeze the board.
-- `net.on_packet_received`: hand it to the radio driver
-  (`.hal.radio.wifi.on_packet_received` in `microzig_options`) to feed frames to lwIP.
+  for the lock would freeze the board. `log_unlocked` for firmware without the RTOS. A line
+  over 256 bytes is cut and marked ` [cut]`, not dropped.
+- `net.std_options(extra_scopes)` and `net.microzig_options`: the firmware root's options.
+  The latter already hands received frames to lwIP (`net.on_packet_received`).
+- HTTPS (`https`): each read times out after 10 s, the whole exchange after 60 s, so a
+  server dripping bytes can't hold the task.
 
 From an example's `build.zig`:
 

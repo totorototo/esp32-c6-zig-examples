@@ -22,24 +22,11 @@ const Color = WS2812.Color;
 pub const panic = microzig.panic;
 
 pub const std_options = microzig.std_options(.{
-    .logFn = uart_log,
+    .logFn = @import("uart_log").log_unlocked, // one task: no lock (../common)
 });
 
 comptime {
     _ = microzig.export_startup();
-}
-
-var log_buf: [256]u8 = undefined;
-
-fn uart_log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    _ = scope;
-    const line = std.fmt.bufPrint(&log_buf, "[" ++ level.asText() ++ "] " ++ format ++ "\r\n", args) catch return;
-    hal.uart.write(0, line);
 }
 
 const led_pin = gpio.num(8);

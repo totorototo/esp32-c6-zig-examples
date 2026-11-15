@@ -26,7 +26,11 @@ the colour as picked. Wokwi draws the raw value, so use `-Dled_level=255` there.
 | `GET /state` | `{"on":true,"r":255,"g":96,"b":0}` |
 | `POST /set?on=1&r=255&g=0&b=0` | Applies any subset of the parameters, returns the state |
 
-    curl -X POST 'http://localhost:8080/set?on=1&r=0&g=0&b=255'
+Every POST needs an `X-Weblight` header (any value), else 403: without it, any web page open
+in your browser could change the LED (a bodiless cross-site POST needs no CORS preflight; a
+custom header does, and the board never grants one). The control page sends it.
+
+    curl -X POST -H 'X-Weblight: 1' 'http://localhost:8080/set?on=1&r=0&g=0&b=255'
 
 The server handles one connection at a time and closes it after each response.
 

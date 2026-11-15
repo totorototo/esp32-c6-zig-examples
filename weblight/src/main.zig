@@ -3,7 +3,9 @@
 //! Joins Wi-Fi (`-Dssid=... -Dpassword=...`, default `Wokwi-GUEST`), then serves on port 80:
 //!   GET  /                         the control page
 //!   GET  /state                    {"on":true,"r":255,"g":128,"b":0}
-//!   POST /set?on=1&r=255&g=128&b=0 apply (any subset of the parameters), returns the state
+//!   POST /set?on=1&r=255&g=128&b=0 apply (any subset of the parameters), returns the state;
+//!                                  needs an `X-Weblight` header (any value), as hue's POSTs
+//!                                  need `X-Hue-Remote`
 //! Logs go to UART0 (115200 baud), so they show up in the Wokwi serial monitor.
 const std = @import("std");
 const microzig = @import("microzig");
@@ -105,16 +107,15 @@ fn serve(conn: *lwip.c.netconn) !void {
     };
     std.log.info("{s} {s}{s}{s}", .{ req.method, req.path, if (req.query.len > 0) "?" else "", req.query });
 
-    if (std.mem.eql(u8, req.path, "/")) {
-        if (!std.mem.eql(u8, req.method, "GET")) return web.respond(conn, "405 Method Not Allowed", "text/plain", "GET only\n");
-        return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
-    }
-    if (std.mem.eql(u8, req.path, "/state")) {
-        return respond_state(conn);
-    }
-    if (std.mem.eql(u8, req.path, "/set")) {
-        if (!std.mem.eql(u8, req.method, "POST")) return web.respond(conn, "405 Method Not Allowed", "text/plain", "POST only\n");
-        update_state(req.query) catch return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
+    // Other web pages the user has open must not reach the LED (see the helper).
+    if (try web.refuse_cross_site(conn, req, remote_header)) return;
+
+    // Routed as in hue: method and path together, anything else is a 404.
+    if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
+    if (req.is("GET", "/state")) return respond_state(conn);
+    if (req.is("POST", "/set")) {
+        update_state(req.query) catch
+            return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
         try apply_state();
         return respond_state(conn);
     }
@@ -140,3 +141,5 @@ fn respond_state(conn: *lwip.c.netconn) !void {
 }
 
 const page = @embedFile("page.html");
+/// Required on every POST (any value), see `serve`.
+const remote_header = "X-Weblight";

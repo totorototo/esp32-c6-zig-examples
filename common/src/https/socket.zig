@@ -2,6 +2,7 @@
 //! `std.crypto.tls.Client` reads records from and writes records to. Plus DNS and one UDP
 //! exchange (for SNTP).
 const std = @import("std");
+const microzig = @import("microzig");
 const net = @import("net");
 const lwip = net.lwip;
 const verify = @import("verify").verify;
@@ -40,25 +41,53 @@ pub fn ip_text(addr: lwip.c.ip_addr_t, buf: *[16]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{}.{}.{}.{}", .{ o[0], o[1], o[2], o[3] }) catch unreachable;
 }
 
+fn uptime_us() u64 {
+    return microzig.hal.time.get_time_since_boot().to_us();
+}
+
 pub const Tcp = struct {
     conn: *lwip.c.netconn,
     /// The netbuf being read, and how much of it was consumed.
     pending: ?*lwip.c.netbuf = null,
     pending_off: u16 = 0,
     closed: bool = false,
+    /// Uptime (us) by which the whole exchange must be over. `recv_timeout` bounds each
+    /// read only: a peer sending a byte every few seconds would otherwise hold the
+    /// connection, and the task, for as long as it likes.
+    deadline_us: u64,
+    /// The per-read timeout `connect` was given; reads near the deadline get less.
+    read_timeout_ms: u32,
 
     reader: std.Io.Reader,
     writer: std.Io.Writer,
 
+    pub const Timeouts = struct {
+        /// For connecting, and for each read.
+        read_ms: u32,
+        /// For everything from `connect` to the last byte read.
+        total_ms: u32,
+    };
+
     /// `read_buffer` must hold one TLS record (`std.crypto.tls.Client.min_buffer_len`).
-    pub fn connect(t: *Tcp, addr: lwip.c.ip_addr_t, port: u16, read_buffer: []u8, write_buffer: []u8, timeout_ms: u32) !void {
+    pub fn connect(
+        t: *Tcp,
+        addr: lwip.c.ip_addr_t,
+        port: u16,
+        read_buffer: []u8,
+        write_buffer: []u8,
+        timeouts: Timeouts,
+    ) !void {
+        verify(timeouts.read_ms <= timeouts.total_ms, "a read fits in the whole exchange");
+        const start_us = uptime_us();
         const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
             return error.OutOfMemory;
         errdefer _ = lwip.c.netconn_delete(conn);
-        conn[0].recv_timeout = @intCast(timeout_ms);
+        conn[0].recv_timeout = @intCast(timeouts.read_ms);
         try lwip.c_err(lwip.c.netconn_connect(conn, &addr, port));
         t.* = .{
             .conn = conn,
+            .deadline_us = start_us + @as(u64, timeouts.total_ms) * 1000,
+            .read_timeout_ms = timeouts.read_ms,
             .reader = .{ .vtable = &.{ .stream = stream }, .buffer = read_buffer, .seek = 0, .end = 0 },
             .writer = .{ .vtable = &.{ .drain = drain }, .buffer = write_buffer },
         };
@@ -76,6 +105,13 @@ pub const Tcp = struct {
         const t: *Tcp = @alignCast(@fieldParentPtr("reader", r));
         if (t.pending == null) {
             if (t.closed) return error.EndOfStream;
+            const now = uptime_us();
+            if (now >= t.deadline_us) {
+                log.warn("the peer is too slow: over the time allowed for the whole exchange", .{});
+                return error.ReadFailed;
+            }
+            const left_ms: u32 = @intCast(@min((t.deadline_us - now) / 1000 + 1, t.read_timeout_ms));
+            t.conn.recv_timeout = @intCast(left_ms);
             var nb: ?*lwip.c.netbuf = null;
             lwip.c_err(lwip.c.netconn_recv(t.conn, &nb)) catch |err| switch (err) {
                 error.ConnectionClosed => {

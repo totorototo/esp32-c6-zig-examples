@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     const config = options.createModule();
     fw.exe.root_module.addImport("config", config);
 
-    // Wi-Fi, lwIP and the HTTP helpers, shared with the other Wi-Fi example (../common).
+    // Wi-Fi, lwIP, HTTP and settings, shared with the other Wi-Fi samples (../common).
     if (!common.add_net(b, mz_dep, fw, .{ .optimize = optimize, .config = config })) return;
     // The ILI9341 + FT6206 touch screen, font and text (../common, shared with netatmo).
     common.add_screen(b, fw);

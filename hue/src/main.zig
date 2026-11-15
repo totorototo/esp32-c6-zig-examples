@@ -289,17 +289,7 @@ fn forget() noreturn {
 
 fn restart() noreturn {
     rtos.sleep(.from_ms(500)); // let the log and the screen catch up
-    reset_chip();
-}
-
-/// Reboots the whole chip (radio and peripherals too, like the reset button). Wokwi ignores
-/// the C6 system reset, so if the chip is still running a moment later, a CPU reset (which
-/// Wokwi does) takes over. On hardware the system reset always wins: a CPU-only reset would
-/// leave the radio and the other peripherals running into the next boot.
-fn reset_chip() noreturn {
-    microzig.chip.peripherals.LP_AON.SYS_CFG.modify(.{ .HPSYS_SW_RESET = 1 });
-    hal.rom.delay_us(10_000);
-    hal.rom.software_reset_cpu();
+    @import("system").reset(); // the whole chip, radio included (../common)
 }
 
 // ---- demo: no Wi-Fi, no bridge, made-up rooms (-Ddemo=true) ----
@@ -467,11 +457,8 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
     };
     std.log.info("{s} {s}{s}{s}", .{ req.method, req.path, if (req.query.len > 0) "?" else "", req.query });
 
-    // Any web page the user opens could send a bodiless POST here (no CORS preflight for
-    // those). A custom header makes the browser ask first, and the board never says yes,
-    // so only page.html (same origin) and curl -H get through.
-    if (std.mem.eql(u8, req.method, "POST") and req.header(remote_header) == null)
-        return web.respond(conn, "403 Forbidden", "text/plain", "missing the " ++ remote_header ++ " header\n");
+    // Other web pages the user has open must not reach the lights (see the helper).
+    if (try web.refuse_cross_site(conn, req, remote_header)) return;
 
     if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
     if (req.is("GET", "/state")) return respond_state(conn);

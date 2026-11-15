@@ -1,5 +1,6 @@
 const std = @import("std");
 const microzig = @import("microzig");
+const common = @import("common");
 
 const MicroBuild = microzig.MicroBuild(.{
     .esp = true,
@@ -31,6 +32,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
         });
         fw.exe.root_module.addImport("config", options.createModule());
+        // The UART0 logger, shared with the other samples (../common).
+        _ = common.add_base(b, fw);
 
         // Each target's own format: ESP image, raw binary, ESP image of RAM segments.
         mb.install_firmware(fw, .{});

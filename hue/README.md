@@ -109,7 +109,7 @@ MISO and the touch INT pin stay unconnected. The screen takes SPI2, the C6's onl
 general-purpose SPI; the on-board LED is on RMT, the backlight on LEDC PWM. A breakout whose
 LED pin drives the backlight through a transistor (Adafruit's does) is fine on a GPIO; on a
 bare panel, put one in. If touches land mirrored on a real panel, flip the
-axes in `src/ft6206.zig` `read`.
+axes in `../common/src/screen/ft6206.zig` `read`.
 
 ## Build
 

@@ -1,8 +1,9 @@
-//! Shared networking for the Wi-Fi examples: Wi-Fi bring-up, the lwIP OS glue and small
-//! HTTP helpers, as one `net` module.
+//! Code shared by the examples: `add_base` (logger, `verify`, chip reset) for any of them,
+//! `add_net` (Wi-Fi, lwIP, HTTP, HTTPS, settings) for the Wi-Fi ones, `add_screen` for the
+//! touch screen, `add_tests` for host tests.
 //!
 //! An example depends on this directory (`.common = .{ .path = "../common" }`) and calls
-//! `add_net` from its build.zig. The module is created in the example's own builder and
+//! these from its build.zig. The module is created in the example's own builder and
 //! attached to its firmware, so it shares the firmware's `microzig` module rather than
 //! compiling against a second copy.
 const std = @import("std");
@@ -41,14 +42,9 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     const lwip = lwip_dep.module("lwip");
     lwip.linkLibrary(foundation_dep.artifact("foundation"));
 
-    // The UART0 logger the RTOS samples share (safe to call from a trap or a panic), also
-    // wired into net.std_options.
-    const uart_log = b.createModule(.{ .root_source_file = common.path("src/uart_log.zig") });
-    fw.add_app_import("uart_log", uart_log, .{ .depend_on_microzig = true });
-
-    // An assertion that stays on in ReleaseSmall (see STYLE.md).
-    const verify = b.createModule(.{ .root_source_file = common.path("src/verify.zig") });
-    fw.add_app_import("verify", verify, .{});
+    const base = add_base(b, fw);
+    const uart_log = base.uart_log;
+    const verify = base.verify;
 
     const net = b.createModule(.{ .root_source_file = common.path("src/net.zig") });
     net.addImport("lwip", lwip);
@@ -69,6 +65,23 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     https.addImport("verify", verify);
     fw.add_app_import("https", https, .{ .depend_on_microzig = true });
     return true;
+}
+
+pub const Base = struct { uart_log: *std.Build.Module, verify: *std.Build.Module };
+
+/// The modules any example can use, Wi-Fi or not: `uart_log` (UART0 logger, safe in a trap
+/// or a panic), `verify` (an assertion that stays in ReleaseSmall, see STYLE.md) and
+/// `system` (`reset`). Only what the firmware imports gets compiled. `add_net` calls this:
+/// call it yourself only without `add_net` (each import may be added once).
+pub fn add_base(b: *std.Build, fw: anytype) Base {
+    const common = b.dependency("common", .{});
+    const uart_log = b.createModule(.{ .root_source_file = common.path("src/uart_log.zig") });
+    fw.add_app_import("uart_log", uart_log, .{ .depend_on_microzig = true });
+    const verify = b.createModule(.{ .root_source_file = common.path("src/verify.zig") });
+    fw.add_app_import("verify", verify, .{});
+    const system = b.createModule(.{ .root_source_file = common.path("src/system.zig") });
+    fw.add_app_import("system", system, .{ .depend_on_microzig = true });
+    return .{ .uart_log = uart_log, .verify = verify };
 }
 
 /// The touch screen (ILI9341 + FT6206), font, colours and text drawing, as a `screen` module.

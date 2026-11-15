@@ -17,24 +17,11 @@ const time = hal.time;
 pub const panic = microzig.panic;
 
 pub const std_options = microzig.std_options(.{
-    .logFn = uart_log,
+    .logFn = @import("uart_log").log_unlocked, // one task: no lock (../common)
 });
 
 comptime {
     _ = microzig.export_startup();
-}
-
-var log_buf: [256]u8 = undefined;
-
-fn uart_log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    _ = scope;
-    const line = std.fmt.bufPrint(&log_buf, "[" ++ level.asText() ++ "] " ++ format ++ "\r\n", args) catch return;
-    hal.uart.write(0, line);
 }
 
 // A global: the store holds a 4 KiB page buffer.
@@ -96,7 +83,7 @@ pub fn main() !void {
         try settings.set_blob("blob", &blob);
         std.log.info("first boot: values stored, resetting", .{});
         time.sleep_ms(50); // let the UART drain
-        reset_chip();
+        @import("system").reset(); // the whole chip, radio included (../common)
     }
 
     // Second boot (or later, on hardware): everything must have survived the reset.
@@ -134,14 +121,4 @@ pub fn main() !void {
         std.log.err("nvs test: FAIL ({} checks failed)", .{failures});
     }
     while (true) {}
-}
-
-/// Reboots the whole chip (radio and peripherals too, like the reset button). Wokwi ignores
-/// the C6 system reset, so if the chip is still running a moment later, a CPU reset (which
-/// Wokwi does) takes over. On hardware the system reset always wins: a CPU-only reset would
-/// leave the radio and the other peripherals running into the next boot.
-fn reset_chip() noreturn {
-    microzig.chip.peripherals.LP_AON.SYS_CFG.modify(.{ .HPSYS_SW_RESET = 1 });
-    hal.rom.delay_us(10_000);
-    hal.rom.software_reset_cpu();
 }

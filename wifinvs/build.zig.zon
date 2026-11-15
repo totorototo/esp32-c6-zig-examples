@@ -4,9 +4,10 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
+        .common = .{ .path = "../common" },
         .microzig = .{
-            .url = "git+https://github.com/totorototo/microzig#6fbdf08ccc71d077673d7a096aa53a30d93ebad5",
-            .hash = "microzig-0.17.33-D20YScCRlAH49aNkk_1j7P_2o79kr9r7RUtIJpHpM-6b",
+            .url = "git+https://github.com/totorototo/microzig#5b006d97fd72d8f6a7b9ca2585aa7a8d59b1a601",
+            .hash = "microzig-0.17.33-D20YScOplAErNYjiQEJorL4csCGsnvmafbJS9Ejyt2sn",
         },
     },
     .paths = .{

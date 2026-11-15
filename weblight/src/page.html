@@ -22,7 +22,7 @@
   const hex = (j) => '#' + [j.r, j.g, j.b].map((v) => v.toString(16).padStart(2, '0')).join('');
   const show = (j) => { st.textContent = (j.on ? 'on ' : 'off ') + hex(j); };
   function set(params) {
-    fetch('/set?' + new URLSearchParams(params), { method: 'POST' })
+    fetch('/set?' + new URLSearchParams(params), { method: 'POST', headers: { 'X-Weblight': '1' } })
       .then((r) => r.json()).then(show)
       .catch(() => { st.textContent = 'board not reachable'; });
   }
