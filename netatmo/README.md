@@ -76,8 +76,11 @@ teal and amber to red:
 - **tap** a room in manual mode: back to its schedule.
 
 Each action is one HTTPS request, so the setpoint line shows `SENDING` for about a second
-(about 9 s in Wokwi). The rooms are re-read every 2 minutes, and the access token is
-renewed before it expires (it lasts 3 hours).
+(about 9 s in Wokwi). The screen keeps answering meanwhile: the requests run on the main
+task and the screen on its own (`src/worker.zig`, the pattern of `../hue`'s bridge task).
+An action made while another is sending waits its turn; a newer one replaces it, so a
+second drag sends only the last setpoint. The rooms are re-read every 2 minutes, and the
+access token is renewed before it expires (it lasts 3 hours).
 
 To look at the screen without credentials or a network: `-Ddemo=true` (made-up rooms and a
 scripted finger that swipes, drags and taps by itself).
@@ -85,6 +88,8 @@ scripted finger that swipes, drags and taps by itself).
 ## Memory
 
 Same budget as `tls`: the main stack is 112 KiB (`init_with_heap(112 * 1024)` reserves it;
-the heap gets the rest, about 124 KiB, for Wi-Fi and lwIP, which use about 67 KiB). The
-home's rooms and modules (at most 16 and 24) live in a static, not on the stack, which a TLS
+the heap gets the rest, about 124 KiB, for Wi-Fi and lwIP, which use about 67 KiB, and the
+screen task's 8 KiB stack). That is why the requests stay on the main task: a second stack
+big enough for TLS wouldn't fit in the heap. The
+home's rooms and modules (at most 16 and 24) live in statics, one per task, not on the stack, which a TLS
 handshake takes about 86 KiB of.

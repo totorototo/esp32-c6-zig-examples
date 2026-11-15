@@ -21,6 +21,8 @@ const energy = @import("energy.zig");
 const settings = @import("settings.zig");
 const screen = @import("screen");
 const thermo = @import("thermo.zig");
+const worker = @import("worker.zig");
+const verify = @import("verify").verify;
 
 const hal = microzig.hal;
 const rtos = hal.rtos;
@@ -69,7 +71,7 @@ pub fn main() !void {
     // lwIP's allocator (set up by net.up) would be dropped at link time.
     var demo_mode = config.demo;
     _ = &demo_mode;
-    if (demo_mode) demo();
+    if (demo_mode) demo(heap.allocator());
 
     try net.up(heap.allocator());
 
@@ -89,7 +91,11 @@ pub fn main() !void {
             backoff_ms = @min(backoff_ms * 2, retry_max_ms);
         }
     }
-    if (config.screen and config.test_room.len == 0) ui_loop();
+    if (config.screen and config.test_room.len == 0) {
+        @memcpy(std.mem.asBytes(&home_state), std.mem.asBytes(&net_home));
+        try start_ui(heap.allocator());
+        worker.serve(run_cmd);
+    }
 }
 
 /// Doubling from 10 s to 5 min between attempts: an outage on Netatmo's side
@@ -115,66 +121,102 @@ fn permanent(err: anyerror) bool {
     };
 }
 
+/// Boot only: once the UI task runs, the screen is its alone.
 fn status(text: []const u8, colour: screen.Rgb) void {
+    verify(!ui_started, "the main task draws only before the UI task starts");
     if (config.screen) thermo.message(text, colour);
 }
 
-// ---- what the screen calls ----
+// ---- the screen's task (see worker.zig) ----
 
+/// The home the screen shows: written only by the UI task (`worker.poll` copies into it).
 pub fn current_home() *energy.Home {
     return &home_state;
 }
 
-pub fn refresh_status() !void {
-    if (config.demo) return;
-    try read_status(&home_state, try auth_headers());
+/// Above the main task (`.lowest`), so a TLS handshake there doesn't hold up a frame; level
+/// with lwIP's thread (common/src/lwip/exports.zig), which only runs briefly per packet.
+const ui_priority: rtos.Priority = @fromBackingInt(2);
+/// Its deepest path is drawing: a 96-byte glyph row, a SPI FIFO's worth, number formatting.
+const ui_stack_size = 8 * 1024;
+var ui_started = false;
+
+fn start_ui(gpa: std.mem.Allocator) !void {
+    ui_started = true;
+    _ = try rtos.spawn(gpa, ui_loop, .{}, .{
+        .name = "ui",
+        .stack_size = ui_stack_size,
+        .priority = ui_priority,
+    });
 }
 
-/// `temp` null: back to the schedule. Updates the local copy once the API accepted.
-pub fn set_room(r: *energy.Room, temp: ?f32) !void {
-    if (config.demo) {
-        if (temp) |t| {
-            r.setpoint = t;
-            r.mode.set("manual");
-        } else r.mode.set("schedule");
-        rtos.sleep(.from_ms(600)); // so SENDING shows
-        return;
-    }
-    const hs = try auth_headers();
-    if (temp) |t| {
-        var buf: [8]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{d:.1}", .{t});
-        const end = (https.now() orelse return error.NoTime) + manual_minutes * 60;
-        try set_room_api(&home_state, hs, r.id.slice(), "manual", text, end);
-        r.setpoint = t;
-        r.mode.set("manual");
-        std.log.info("`{s}` set to {d:.1} °C for {} min", .{ r.name.slice(), t, manual_minutes });
-    } else {
-        try set_room_api(&home_state, hs, r.id.slice(), "home", null, null);
-        std.log.info("`{s}` back to its schedule", .{r.name.slice()});
-        // The schedule's setpoint comes from the bridge.
-        try read_status(&home_state, hs);
-    }
-}
-
-/// How long a setpoint from the screen holds before the schedule takes over again: the
-/// Netatmo app's default.
-const manual_minutes = 180;
 const refresh_ms = 120_000;
 
+/// The UI task: the screen every 20 ms, and the next request for the main task when it's
+/// free, a finger's first, then the periodic refresh. Never waits on the network.
 fn ui_loop() noreturn {
     var last_refresh = now_ms();
     while (true) {
         const t = now_ms();
+        if (worker.poll(&home_state)) |d| thermo.done(d);
         thermo.tick(t);
         // The demo's scripted finger doesn't wake it, so it stays lit there.
         if (config.screen and !config.demo) screen.backlight.tick(t);
-        if (t - last_refresh >= refresh_ms) {
-            last_refresh = t;
-            refresh_status() catch |err| std.log.warn("refresh failed: {t}", .{err});
+        if (worker.idle()) {
+            if (thermo.take_action()) |s| {
+                worker.submit(.{ .set = s });
+            } else if (t - last_refresh >= refresh_ms) {
+                last_refresh = t;
+                worker.submit(.refresh);
+            }
         }
         rtos.sleep(.from_ms(20));
     }
+}
+
+// ---- the main task's side: the requests ----
+
+/// How long a setpoint from the screen holds before the schedule takes over again: the
+/// Netatmo app's default.
+const manual_minutes = 180;
+
+/// One command from the UI task, against `net_home`, which only this task touches.
+fn run_cmd(cmd: worker.Cmd) worker.Result {
+    if (config.demo) return demo_cmd(cmd);
+    const hs = try auth_headers();
+    switch (cmd) {
+        .refresh => {
+            try read_status(&net_home, hs);
+            return &net_home;
+        },
+        .set => |s| {
+            const id = s.room.slice();
+            const name = if (net_home.room(id)) |r| r.name.slice() else id;
+            if (s.temp) |t| {
+                var buf: [8]u8 = undefined;
+                const text = try std.fmt.bufPrint(&buf, "{d:.1}", .{t});
+                const end = (https.now() orelse return error.NoTime) + manual_minutes * 60;
+                try set_room_api(&net_home, hs, id, "manual", text, end);
+                std.log.info("`{s}` set to {d:.1} °C for {} min", .{ name, t, manual_minutes });
+                return null; // applied as sent: the next refresh confirms it
+            }
+            try set_room_api(&net_home, hs, id, "home", null, null);
+            std.log.info("`{s}` back to its schedule", .{name});
+            // The schedule's setpoint is Netatmo's to say. The change went through either
+            // way: a failed re-read only means the screen catches up at the next refresh.
+            read_status(&net_home, hs) catch |err| {
+                std.log.warn("`{s}` not re-read: {t}", .{ name, err });
+                return null;
+            };
+            return &net_home;
+        },
+    }
+}
+
+/// Offline: Netatmo "accepts" everything, slowly enough for SENDING to show.
+fn demo_cmd(cmd: worker.Cmd) worker.Result {
+    if (cmd == .set) rtos.sleep(.from_ms(600));
+    return null;
 }
 
 fn now_ms() u64 {
@@ -207,7 +249,7 @@ var token_lifetime: i64 = 10800;
 
 // ---- demo: made-up rooms, no network (-Ddemo=true) ----
 
-fn demo() noreturn {
+fn demo(gpa: std.mem.Allocator) noreturn {
     std.log.info("demo: made-up rooms, no network", .{});
     const h = &home_state;
     h.* = .{};
@@ -226,7 +268,8 @@ fn demo() noreturn {
         room.mode.set(r[4]);
         h.n_rooms += 1;
     }
-    ui_loop();
+    start_ui(gpa) catch |err| std.debug.panic("no UI task: {t}", .{err});
+    worker.serve(run_cmd);
 }
 
 fn run() !void {
@@ -237,7 +280,7 @@ fn run() !void {
     const headers = try auth_headers();
 
     // ---- homesdata ----
-    const home = &home_state;
+    const home = &net_home;
     home.* = .{};
     {
         var id_buf: [32]u8 = undefined;
@@ -422,7 +465,9 @@ fn expect_ok(stream: *https.Stream) !void {
     return error.ApiError;
 }
 
-/// A static, not a local: ~4 KiB, and the stack is busy enough with TLS.
+/// Statics, not locals: ~4 KiB each, and the stack is busy enough with TLS. Two of them, one
+/// per task (worker.zig): what the main task reads into, and what the screen shows.
+var net_home: energy.Home = .{};
 var home_state: energy.Home = .{};
 
 // The streaming JSON reader's nesting stack and any string split across TLS records.

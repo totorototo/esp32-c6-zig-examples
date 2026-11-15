@@ -7,14 +7,16 @@
 //!                        home's default duration)
 //!   tap                  a room in manual mode goes back to its schedule
 //!
-//! Every action is an HTTPS request (about a second on the chip, ~9 s in Wokwi): the setpoint
-//! line shows SENDING meanwhile. Actions and refreshes go through the root module
-//! (`app.refresh_status`, `app.set_room`), so a demo build can swap in offline ones.
+//! Every action is an HTTPS request (about a second on the chip, ~9 s in Wokwi), made by the
+//! main task (worker.zig): the setpoint line shows SENDING meanwhile, and the screen keeps
+//! answering. Runs on the UI task: `tick`, then `take_action` for what to send, and `done`
+//! when it's through.
 const std = @import("std");
 const config = @import("config");
 const screen = @import("screen");
 const energy = @import("energy.zig");
 const app = @import("root");
+const worker = @import("worker.zig");
 
 const lcd = screen.lcd;
 const Point = screen.Point;
@@ -80,7 +82,11 @@ const Gesture = struct {
 var g: Gesture = .{};
 /// The setpoint being dragged to, shown instead of the room's.
 var preview: ?f32 = null;
-var sending = false;
+/// The last action, waiting for the main task to be free. A newer one replaces it: the
+/// latest drag is the setpoint wanted.
+var pending: ?worker.Set = null;
+/// The room whose action is with the main task.
+var sending_room: ?worker.RoomId = null;
 
 pub fn tick(t: u64) void {
     if (touch_ok or config.demo) poll(t);
@@ -143,12 +149,31 @@ fn release(r: *energy.Room, t: u64) void {
     }
 }
 
-/// `temp` null: back to the schedule.
+/// `temp` null: back to the schedule. Sent once the main task is free (`take_action`).
 fn send(r: *energy.Room, temp: ?f32) void {
-    sending = true;
-    render();
-    defer sending = false;
-    app.set_room(r, temp) catch |err| log.err("sending to `{s}` failed: {t}", .{ r.name.slice(), err });
+    if (pending) |old| if (!old.room.eql(r.id.slice())) {
+        log.warn("`{s}`: replaced by a newer action before it was sent", .{old.room.slice()});
+    };
+    pending = .{ .room = r.id, .temp = temp };
+}
+
+/// The action to send now, if any: it's then with the main task until `done`.
+pub fn take_action() ?worker.Set {
+    const s = pending orelse return null;
+    pending = null;
+    sending_room = s.room;
+    return s;
+}
+
+/// The main task is through with a command (already applied to the shown home).
+pub fn done(d: worker.Done) void {
+    if (d.cmd == .set) sending_room = null;
+}
+
+fn is_sending(r: *const energy.Room) bool {
+    if (pending) |p| if (p.room.eql(r.id.slice())) return true;
+    if (sending_room) |s| if (s.eql(r.id.slice())) return true;
+    return false;
 }
 
 // ---- drawing ----
@@ -190,7 +215,7 @@ fn render() void {
         .heating = (r.heating orelse 0) > 0,
         .reachable = r.reachable,
         .previewing = preview != null,
-        .sending = sending,
+        .sending = is_sending(r),
         .index = index,
         .count = count(),
     };
