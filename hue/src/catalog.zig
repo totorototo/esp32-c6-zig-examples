@@ -1,7 +1,8 @@
 //! The bridge's lights and rooms/zones as last read, plus which one is selected.
 //!
 //! Fixed-size copies, so nothing points into the parser's arena or the shared response
-//! buffer once a refresh returns.
+//! buffer once a refresh returns. Owned by the UI task: the bridge task reads into its own
+//! copies and hands them over (see bridge.zig).
 const std = @import("std");
 const hue = @import("hue.zig");
 /// The bridge's scene record, as `scenes.zig` reads it (catalog.Scene is the kept copy).
@@ -51,6 +52,15 @@ pub const Entry = struct {
         return .{ .kind = e.kind, .id = e.id() };
     }
 
+    /// A fresh read of one light or group, outside any list.
+    pub fn make(kind: hue.Kind, entry_id: []const u8, n: []const u8, state: hue.LightState) Entry {
+        var e: Entry = .{ .kind = kind, .state = state };
+        e.id_len = @intCast(@min(entry_id.len, e.id_buf.len));
+        @memcpy(e.id_buf[0..e.id_len], entry_id[0..e.id_len]);
+        e.set_name(n);
+        return e;
+    }
+
     fn set_name(e: *Entry, n: []const u8) void {
         const trimmed = std.mem.trimEnd(u8, n, " ");
         e.name_len = @intCast(@min(trimmed.len, e.name_buf.len));
@@ -71,6 +81,15 @@ pub const List = struct {
         return null;
     }
 };
+
+pub fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.LightState) void {
+    if (l.len == max_entries or id.len > 8) {
+        log.warn("skipping {t} {s} `{s}`: list full or id too long", .{ kind, id, n });
+        return;
+    }
+    l.items[l.len] = .make(kind, id, n, state);
+    l.len += 1;
+}
 
 pub var lights: List = .{};
 
@@ -111,101 +130,83 @@ pub fn selected() ?*Entry {
     return list(selected_kind).find(selected_id_buf[0..selected_id_len]);
 }
 
-// ---- bridge access ----
+// ---- what the bridge task sends back, applied here ----
+//
+// The bridge task (bridge.zig) does the requests and never touches these globals: the UI
+// task applies what it read, so the screen, the web remote and the LED read one copy with
+// no lock.
 
-pub const Context = struct {
-    bridge: hue.Bridge,
-    user: []const u8,
-    allocator: std.mem.Allocator,
-};
-
-/// Replaces `kind`'s list with what the bridge has now. Rooms and zones only: the other
-/// group types (LightGroup, Entertainment, Luminaire) are app or bridge internals.
-pub fn refresh(ctx: Context, kind: hue.Kind) !void {
-    if (offline) return;
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    const l = list(kind);
-    // Static, not on the stack: 1.4 KiB.
-    const fresh = &scratch;
-    fresh.len = 0;
-    switch (kind) {
-        .light => {
-            const map = try hue.get_lights(arena.allocator(), ctx.bridge, ctx.user);
-            var it = map.map.iterator();
-            while (it.next()) |kv| add(fresh, .light, kv.key_ptr.*, kv.value_ptr.name, kv.value_ptr.state);
-        },
-        .group => {
-            const map = try hue.get_groups(arena.allocator(), ctx.bridge, ctx.user);
-            var it = map.map.iterator();
-            while (it.next()) |kv| {
-                const g = kv.value_ptr.*;
-                if (!std.mem.eql(u8, g.type, "Room") and !std.mem.eql(u8, g.type, "Zone")) continue;
-                add(fresh, .group, kv.key_ptr.*, g.name, g.as_light().state);
-                if (fresh.len > 0) fresh.items[fresh.len - 1].set_members(g.lights);
-            }
-        },
-    }
-    l.* = fresh.*;
+/// Replaces `kind`'s list with a fresh read.
+pub fn apply_list(kind: hue.Kind, fresh: *const List) void {
+    list(kind).* = fresh.*;
 }
 
-var scratch: List = .{};
-
-pub fn add(l: *List, kind: hue.Kind, id: []const u8, n: []const u8, state: hue.LightState) void {
-    if (l.len == max_entries or id.len > 8) {
-        log.warn("skipping {t} {s} `{s}`: list full or id too long", .{ kind, id, n });
-        return;
-    }
-    const e = &l.items[l.len];
-    e.* = .{ .kind = kind, .state = state, .id_len = @intCast(id.len) };
-    @memcpy(e.id_buf[0..id.len], id);
-    e.set_name(n);
-    l.len += 1;
-}
-
-/// Re-reads one entry, e.g. the one open on the screen.
-pub fn refresh_entry(ctx: Context, e: *Entry) !void {
-    if (offline) return;
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    const fresh = try hue.get(arena.allocator(), ctx.bridge, ctx.user, e.target());
+/// Updates the entry that `fresh` was read from, if it's still listed.
+pub fn apply_entry(fresh: *const Entry) void {
+    const e = list(fresh.kind).find(fresh.id()) orelse return;
     e.state = fresh.state;
-    e.set_name(fresh.name);
+    e.set_name(fresh.name());
 }
 
-/// Sends `change` and, when the bridge accepts it, updates the local copy. False when it
-/// didn't go through.
-pub fn apply(ctx: Context, e: *Entry, change: hue.Change) bool {
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    if (!offline) hue.set_state(arena.allocator(), ctx.bridge, ctx.user, e.target(), change) catch |err| {
-        log.err("set {t} {s} failed: {t}", .{ e.kind, e.id(), err });
-        return false;
-    };
+/// Updates the local copy once the bridge took `change`.
+pub fn apply_change(e: *Entry, change: hue.Change) void {
     if (change.on) |v| e.state.on = v;
     if (change.bri) |v| e.state.bri = v;
     if (change.hue) |v| e.state.hue = v;
     if (change.sat) |v| e.state.sat = v;
     log.info("{t} {s} `{s}` -> {s}, bri {?}, hue {?}, sat {?}", .{
-        e.kind, e.id(), e.name(), if (e.state.on) "on" else "off", e.state.bri, e.state.hue, e.state.sat,
+        e.kind,      e.id(),      e.name(),    if (e.state.on) "on" else "off",
+        e.state.bri, e.state.hue, e.state.sat,
     });
-    return true;
 }
 
-/// Turns every light off (group 0 is all of them). False when it didn't go through.
-pub fn all_off(ctx: Context) bool {
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    if (!offline) hue.set_state(arena.allocator(), ctx.bridge, ctx.user, .{ .kind = .group, .id = "0" }, .{ .on = false }) catch |err| {
-        log.err("all off failed: {t}", .{err});
-        return false;
-    };
+/// Every light off (group 0 is all of them), once the bridge took it.
+pub fn apply_all_off() void {
     for ([_]*List{ &lights, &groups }) |l| for (l.slice()) |*e| {
         e.state.on = false;
     };
     log.info("all lights off", .{});
-    return true;
 }
+
+/// A fixed-size copy of an id, for what outlives the entry it came from: a page on the
+/// screen, a change on its way to the bridge.
+pub const Id = struct {
+    buf: [16]u8 = @splat(0),
+    len: u8 = 0,
+
+    pub fn of(s: []const u8) Id {
+        var r: Id = .{};
+        r.len = @intCast(@min(s.len, r.buf.len));
+        @memcpy(r.buf[0..r.len], s[0..r.len]);
+        return r;
+    }
+
+    pub fn get(id: *const Id) []const u8 {
+        return id.buf[0..id.len];
+    }
+};
+
+/// A light or a room by id, not by pointer: a refresh can add, drop or move entries.
+pub const Ref = struct {
+    kind: hue.Kind,
+    id: Id,
+
+    pub fn of(e: *const Entry) Ref {
+        return .{ .kind = e.kind, .id = .of(e.id()) };
+    }
+
+    pub fn entry(r: *const Ref) ?*Entry {
+        return list(r.kind).find(r.id.get());
+    }
+
+    pub fn is(r: *const Ref, e: *const Entry) bool {
+        return r.kind == e.kind and std.mem.eql(u8, r.id.get(), e.id());
+    }
+
+    pub fn target(r: *const Ref) hue.Target {
+        return .{ .kind = r.kind, .id = r.id.get() };
+    }
+};
 
 // ---- scenes ----
 
@@ -278,7 +279,6 @@ pub const SceneList = struct {
 };
 
 pub var scenes: SceneList = .{};
-var scene_scratch: SceneList = .{};
 
 /// The scene last recalled from here, by id; the list shows it highlighted.
 var recalled_buf: [16]u8 = undefined;
@@ -288,16 +288,9 @@ pub fn is_recalled(sc: *const Scene) bool {
     return recalled_len > 0 and std.mem.eql(u8, sc.id(), recalled_buf[0..recalled_len]);
 }
 
-/// Replaces the scene list, sorted by room, then name. Room names come from `groups`, so
-/// refresh those first.
-pub fn refresh_scenes(ctx: Context) !void {
-    if (offline) return;
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    const fresh = &scene_scratch;
-    fresh.len = 0;
-    fresh.dropped = 0;
-    try hue.get_scenes(arena.allocator(), ctx.bridge, ctx.user, fresh);
+/// Replaces the scene list with a fresh read, sorted by room, then name. Room names come
+/// from `groups`, so apply those first.
+pub fn apply_scenes(fresh: *SceneList) void {
     if (fresh.dropped > 0) log.warn("{} scenes left out: the list holds {}", .{ fresh.dropped, max_scenes });
     std.mem.sort(Scene, fresh.slice(), {}, scene_less);
     // Keep the looks already read: they cost one request per scene.
@@ -308,17 +301,10 @@ pub fn refresh_scenes(ctx: Context) !void {
     scenes = fresh.*;
 }
 
-/// Reads what `sc` looks like if that isn't known yet. One request; call it for the
-/// scenes on screen, one per tick.
-pub fn load_look(ctx: Context, sc: *Scene) void {
-    if (sc.look != .unknown or offline) return;
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    const look = hue.get_scene_look(arena.allocator(), ctx.bridge, ctx.user, sc.id()) catch |err| {
-        log.warn("scene {s} not read: {t}", .{ sc.id(), err });
-        sc.look = .dark; // don't retry every tick
-        return;
-    };
+/// What scene `id` looks like, as the bridge task read it. Null when it couldn't: shown
+/// dark, so the screen doesn't ask again every tick.
+pub fn apply_look(id: []const u8, look: ?hue.Look) void {
+    const sc = find_scene(id) orelse return;
     sc.look = if (look) |l| .{ .lit = l } else .dark;
 }
 
@@ -329,19 +315,13 @@ fn scene_less(_: void, a: Scene, b: Scene) bool {
     return std.ascii.lessThanIgnoreCase(a.name(), b.name());
 }
 
-/// Recalls `sc` on its room, then re-reads the room. False when it didn't go through.
-pub fn recall(ctx: Context, sc: *const Scene) bool {
-    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
-    defer arena.deinit();
-    if (!offline) hue.recall_scene(arena.allocator(), ctx.bridge, ctx.user, sc.group(), sc.id()) catch |err| {
-        log.err("recall scene {s} failed: {t}", .{ sc.id(), err });
-        return false;
-    };
+/// Marks scene `id` as the one recalled from here, once the bridge took it. Offline
+/// (-Ddemo), nothing re-reads the room: it gets the scene's look directly.
+pub fn apply_recall(id: []const u8) void {
+    const sc = find_scene(id) orelse return;
     recalled_len = sc.id_len;
     @memcpy(recalled_buf[0..recalled_len], sc.id());
     log.info("scene `{s}` recalled on `{s}`", .{ sc.name(), sc.room() });
-
-    // Offline (-Ddemo), nothing re-reads the room: give it the scene's look directly.
     if (offline) if (groups.find(sc.group())) |g| switch (sc.look) {
         .lit => |l| {
             const hs = @import("screen").colour.rgb_to_hue_sat(l.rgb);
@@ -350,13 +330,6 @@ pub fn recall(ctx: Context, sc: *const Scene) bool {
         .dark => g.state.on = false,
         .unknown => {},
     };
-
-    // Show the result now rather than at the next 5 s refresh: re-read the room, and the
-    // selected entry (which the LED mirrors), if it's something else.
-    const room = groups.find(sc.group());
-    if (room) |g| refresh_entry(ctx, g) catch |err| log.warn("room not re-read: {t}", .{err});
-    if (selected()) |e| if (e != room) refresh_entry(ctx, e) catch |err| log.warn("selection not re-read: {t}", .{err});
-    return true;
 }
 
 pub fn find_scene(id: []const u8) ?*Scene {

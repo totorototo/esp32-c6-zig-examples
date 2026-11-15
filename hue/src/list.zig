@@ -1,5 +1,6 @@
 //! The list UI's navigation and touch handling. Called from the main loop every tick; owns
-//! no task.
+//! no task, and makes no requests: main.zig hands what it asks for (`next_change`,
+//! `refresh_cmd`, `next_look`) to the bridge task, and the outcome back (`done`).
 //!
 //!   home (ROOMS | LIGHTS)  ->  a room   ->  its SCENES   (tap: recall)
 //!                                       ->  its LIGHTS   ->  a light
@@ -9,8 +10,8 @@
 //!
 //! Touches act on release, so a press can be shown (the row lights up under the finger)
 //! and a finger that slides off, or turns out to be a swipe, cancels it. Changes are drawn
-//! at once and sent after the frame (see `Outgoing`): the screen doesn't wait for the bridge,
-//! and goes back to what it was if the bridge refuses.
+//! at once and sent by the bridge task (see outbox.zig): the screen doesn't wait for the
+//! bridge, and goes back to what it was if the bridge refuses.
 const std = @import("std");
 const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
@@ -19,6 +20,8 @@ const colourfield = @import("colourfield.zig");
 const backlight = @import("screen").backlight;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
+const bridge = @import("bridge.zig");
+const Outbox = @import("outbox.zig").Outbox;
 const Point = ft6206.Point;
 
 const log = std.log.scoped(.screen);
@@ -46,38 +49,8 @@ const banner_ms = 3000;
 
 // ---- where we are ----
 
-const Id = struct {
-    buf: [16]u8 = @splat(0),
-    len: u8 = 0,
-
-    fn of(s: []const u8) Id {
-        var r: Id = .{};
-        r.len = @intCast(@min(s.len, r.buf.len));
-        @memcpy(r.buf[0..r.len], s[0..r.len]);
-        return r;
-    }
-
-    fn get(id: *const Id) []const u8 {
-        return id.buf[0..id.len];
-    }
-};
-
-const Ref = struct {
-    kind: hue.Kind,
-    id: Id,
-
-    fn of(e: *const catalog.Entry) Ref {
-        return .{ .kind = e.kind, .id = .of(e.id()) };
-    }
-
-    fn entry(r: *const Ref) ?*catalog.Entry {
-        return catalog.list(r.kind).find(r.id.get());
-    }
-
-    fn is(r: *const Ref, e: *const catalog.Entry) bool {
-        return r.kind == e.kind and std.mem.eql(u8, r.id.get(), e.id());
-    }
-};
+const Id = catalog.Id;
+const Ref = catalog.Ref;
 
 /// A page, with the page number for lists. Kept by id: a refresh can drop or reorder entries.
 const View = union(enum) {
@@ -155,19 +128,16 @@ pub fn take_refresh_request() bool {
     return refresh_wanted;
 }
 
-/// Re-reads what the screen shows. Skipped just after a change: the bridge would still
-/// report the old state, and the screen would flick back.
-pub fn refresh(ctx: catalog.Context) !void {
-    if (outgoing != null or now_t -| last_send < settle_ms) return;
-    switch (top().*) {
-        .home => |h| try catalog.refresh(ctx, if (h.tab == .rooms) .group else .light),
-        .entry => |r| if (r.entry()) |e| try catalog.refresh_entry(ctx, e),
-        .scenes => if (scenes_stale) {
-            try catalog.refresh_scenes(ctx);
-            scenes_stale = false;
-        },
-        .lights => try catalog.refresh(ctx, .light),
-    }
+/// What to re-read for the page on screen. Null just after a change: the bridge would
+/// still report the old state, and the screen would flick back.
+pub fn refresh_cmd() ?bridge.Cmd {
+    if (!box.empty() or now_t -| box.last_send < settle_ms) return null;
+    return switch (top().*) {
+        .home => |h| .{ .list = if (h.tab == .rooms) .group else .light },
+        .entry => |r| .{ .entry = r },
+        .scenes => if (scenes_stale) .scenes else null,
+        .lights => .{ .list = .light },
+    };
 }
 
 // ---- the bridge: what failed ----
@@ -202,84 +172,62 @@ pub fn take_forget() bool {
     return forget_confirmed;
 }
 
-// ---- changes: drawn now, sent after the frame ----
+// ---- changes: drawn now, sent by the bridge task ----
 
-const Outgoing = union(enum) {
-    change: struct { ref: Ref, change: hue.Change },
-    recall: Id,
-};
-var outgoing: ?Outgoing = null;
-var last_send: u64 = 0;
+var box: Outbox = .{};
 
 fn queue_change(e: *const catalog.Entry, c: hue.Change) void {
-    if (outgoing) |*o| if (o.* == .change and o.change.ref.is(e)) {
-        const m = &o.change.change;
-        if (c.on) |v| m.on = v;
-        if (c.bri) |v| m.bri = v;
-        if (c.hue) |v| m.hue = v;
-        if (c.sat) |v| m.sat = v;
-        return;
-    };
-    // Something else waiting (two taps within a tick): it goes first.
-    if (outgoing != null) flush(ctx_, true);
-    outgoing = .{ .change = .{ .ref = .of(e), .change = c } };
+    if (!box.change(e, c)) banner_until = now_t + banner_ms;
 }
 
-/// The context of the tick, so `queue_change` can flush.
-var ctx_: catalog.Context = undefined;
-
-fn flush(ctx: catalog.Context, force: bool) void {
-    const o = outgoing orelse return;
-    if (!force and touch.down and touch.mode == .slide and now_t - last_send < drag_send_ms) return;
-    outgoing = null;
-    last_send = now_t;
-    const ok = switch (o) {
-        .change => |c| blk: {
-            const e = c.ref.entry() orelse break :blk true;
-            if (is_noop(e.state, c.change)) break :blk true;
-            break :blk catalog.apply(ctx, e, c.change);
-        },
-        .recall => |id| if (catalog.find_scene(id.get())) |sc| catalog.recall(ctx, sc) else true,
-    };
-    if (!ok) banner_until = now_t + banner_ms;
+fn queue_recall(sc: *const catalog.Scene) void {
+    if (!box.recall(sc)) banner_until = now_t + banner_ms;
 }
 
 /// The entry as the screen should show it: a change on its way wins.
 fn preview(e: *const catalog.Entry) hue.LightState {
-    var v = e.state;
-    const o = outgoing orelse return v;
-    if (o != .change or !o.change.ref.is(e)) return v;
-    const c = o.change.change;
-    if (c.on) |x| v.on = x;
-    if (c.bri) |x| v.bri = x;
-    if (c.hue) |x| v.hue = x;
-    if (c.sat) |x| v.sat = x;
-    return v;
+    return box.preview(e);
 }
 
-fn is_noop(s: hue.LightState, c: hue.Change) bool {
-    return (c.on == null or c.on.? == s.on) and
-        (c.bri == null or std.meta.eql(c.bri, s.bri)) and
-        (c.hue == null or std.meta.eql(c.hue, s.hue)) and
-        (c.sat == null or std.meta.eql(c.sat, s.sat));
+/// The next change for the bridge task, if one waits. While the brightness is slid, at most
+/// one per `drag_send_ms`; the last one goes on release.
+pub fn next_change(t: u64) ?bridge.Cmd {
+    const hold = touch.down and touch.mode == .slide and t -| box.last_send < drag_send_ms;
+    return box.next(t, hold);
+}
+
+/// Scene colours come from one request each: one at a time, for those on screen, when
+/// nothing else is waiting.
+pub fn next_look() ?bridge.Cmd {
+    if (overlay != .none or top().* != .scenes or touch.down) return null;
+    for (page_scenes()) |i| {
+        const sc = &catalog.scenes.items[i];
+        if (sc.look == .unknown) return .{ .look = .of(sc.id()) };
+    }
+    return null;
+}
+
+/// What the bridge task did with a command from here.
+pub fn done(d: bridge.Done) void {
+    switch (d.owner) {
+        .touch => {
+            box.done();
+            if (!d.ok) banner_until = now_t + banner_ms;
+        },
+        .refresh => if (d.cmd == .scenes and d.ok) {
+            scenes_stale = false;
+        },
+        else => {},
+    }
 }
 
 // ---- tick ----
 
-pub fn tick(ctx: catalog.Context, t: u64) void {
+pub fn tick(t: u64) void {
     now_t = t;
-    ctx_ = ctx;
     if (touch_ok) poll(t);
     drop_gone();
     render();
-    flush(ctx, false);
-    // Scene colours come from one request each: one per tick, for those on screen.
-    if (overlay == .none and top().* == .scenes and !touch.down) for (page_scenes()) |i| {
-        if (catalog.scenes.items[i].look == .unknown) {
-            catalog.load_look(ctx, &catalog.scenes.items[i]);
-            break;
-        }
-    };
 }
 
 /// Drops pages whose entry is gone from the bridge.
@@ -407,7 +355,7 @@ fn entry_view(e: *const catalog.Entry) ui.EntryView {
 fn row_of(v: View, i: u8) ui.Row {
     if (v == .scenes) {
         const sc = &catalog.scenes.items[i];
-        const recalled = catalog.is_recalled(sc) or (outgoing != null and outgoing.? == .recall and std.mem.eql(u8, outgoing.?.recall.get(), sc.id()));
+        const recalled = catalog.is_recalled(sc) or box.recalling(sc);
         return .{
             .name = sc.name(),
             .lead = .{ .swatch = switch (sc.look) {
@@ -584,7 +532,9 @@ fn release() void {
     switch (t.mode) {
         .press => if (std.meta.eql(hit_test(t.last), t.hit)) act(t.hit),
         .swipe => swipe(t.last.x < t.start.x),
-        .slide => flush(ctx_, true),
+        // The last value goes at the next tick: `next_change` holds it back only while
+        // the finger is down.
+        .slide => {},
         .cancelled => {},
     }
 }
@@ -622,7 +572,7 @@ fn act(hit: ui.Hit) void {
         .row_switch, .row_open => |r| {
             const item = list_page(v).items[r];
             switch (v.*) {
-                .scenes => outgoing_recall(&catalog.scenes.items[item]),
+                .scenes => queue_recall(&catalog.scenes.items[item]),
                 else => {
                     const e = &list_entries(v.*).?.items[item];
                     if (hit == .row_switch)
@@ -638,9 +588,4 @@ fn act(hit: ui.Hit) void {
         .scenes => push(.{ .scenes = .{ .room = .of(v.entry.id.get()) } }),
         .lights => push(.{ .lights = .{ .room = .of(v.entry.id.get()) } }),
     }
-}
-
-fn outgoing_recall(sc: *const catalog.Scene) void {
-    if (outgoing != null) flush(ctx_, true);
-    outgoing = .{ .recall = .of(sc.id()) };
 }

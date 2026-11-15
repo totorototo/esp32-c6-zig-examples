@@ -23,6 +23,7 @@ const hue = @import("hue.zig");
 const web = net.web;
 const ui = @import("ui.zig");
 const catalog = @import("catalog.zig");
+const bridge_task = @import("bridge.zig");
 /// The touch UI: rooms and lights with a page each (`-Dui=list`), or the gesture-only experiment
 /// (`-Dui=field`). Both have the same interface.
 const touch_ui = switch (config.ui) {
@@ -124,9 +125,9 @@ pub fn main() !void {
         break :blk u;
     } else try pair(bridge);
 
-    const ctx: catalog.Context = .{ .bridge = bridge, .user = user, .allocator = heap.allocator() };
+    const ctx: bridge_task.Context = .{ .bridge = bridge, .user = user, .allocator = heap.allocator() };
     while (true) {
-        if (catalog.refresh(ctx, .light)) |_| break else |err| {
+        if (bridge_task.run_now(ctx, .{ .list = .light })) |_| break else |err| {
             // The common cause: a username from another bridge, or one deleted in the Hue app.
             if (err == error.BridgeError) {
                 if (from_flash) {
@@ -143,9 +144,7 @@ pub fn main() !void {
             wait_or_forget(retry_ms);
         }
     }
-    catalog.refresh(ctx, .group) catch |err| std.log.warn("rooms and zones not read: {t}", .{err});
-    catalog.refresh_scenes(ctx) catch |err| std.log.warn("scenes not read: {t}", .{err});
-    catalog.log_all();
+    read_rest(ctx);
 
     if (config.hue_light.len > 0) {
         if (!catalog.select_id(.light, config.hue_light)) {
@@ -168,6 +167,15 @@ pub fn main() !void {
         halt(.ok, "LIGHTS LISTED\nSEE THE LOG");
     }
     try control(ctx);
+}
+
+/// Rooms and scenes, once the lights are read: without them the remote still works, on
+/// lights only.
+fn read_rest(ctx: bridge_task.Context) void {
+    bridge_task.run_now(ctx, .{ .list = .group }) catch |err|
+        std.log.warn("rooms and zones not read: {t}", .{err});
+    bridge_task.run_now(ctx, .scenes) catch |err| std.log.warn("scenes not read: {t}", .{err});
+    catalog.log_all();
 }
 
 /// The bridge to talk to: `-Dhue_ip`, else the saved address if the bridge still answers
@@ -338,120 +346,262 @@ fn demo() noreturn {
     }
     catalog.select(&catalog.groups.items[0]);
 
-    const ctx: catalog.Context = .{ .bridge = hue.Bridge.from_octets(.{ 0, 0, 0, 0 }), .user = "", .allocator = heap.allocator() };
-    var mirrored: ?hue.LightState = null;
+    // Offline, `bridge.submit` answers each command at once: the same loop as with a
+    // bridge, minus the web remote and the BOOT button. Runs forever, like `control`.
+    var loop: Loop = .{ .last_refresh = now_ms() };
     while (true) {
-        const t = now_ms();
-        if (config.screen) {
-            touch_ui.tick(ctx, t);
-            // The field UI's demo plays gestures by itself: no dimming under it.
-            if (config.ui == .list) backlight.tick(t);
-        }
-        if (catalog.selected()) |e| {
-            if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
-            mirrored = e.state;
-        }
+        loop.tick_screen(now_ms());
         rtos.sleep(.from_ms(poll_ms));
     }
 }
 
-// ---- control: touch screen + web remote + periodic refresh, in one loop ----
+// ---- control: touch screen, BOOT button, refresh, in one loop on the UI task ----
+//
+// Three tasks, each owning what it touches:
+//   - this one (the UI task): the catalog, the screen, the settings, the LED, the button.
+//     It never waits on the network, so it ticks every `poll_ms` whatever the bridge does.
+//   - the bridge task (bridge.zig): every request to the bridge, one command at a time.
+//   - the web task (below): the web remote's connections. It asks this task for the state
+//     and for changes, and waits for the answer; it never reads the catalog itself.
 //
 // The web remote acts on `catalog.selected()`: the light or room open on the screen, or
 // -Dhue_light without one. With nothing selected (the screen's list page before any tap),
 // it does nothing.
 
-const http_port = 80;
+/// Above the bridge and web tasks (which run at `.lowest`), so a long JSON parse there
+/// doesn't hold up a frame; level with lwIP's own thread (common/src/lwip/exports.zig),
+/// which only runs briefly per packet.
+const ui_priority: rtos.Priority = @fromBackingInt(2);
 
-fn control(ctx: catalog.Context) !void {
-    const server = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
-        return error.OutOfMemory;
-    try lwip.c_err(lwip.c.netconn_bind(server, null, http_port));
-    try lwip.c_err(lwip.c.netconn_listen(server));
-    // With LWIP_SO_RCVTIMEO, accept gives up after this long: it doubles as the loop tick,
-    // so the screen, the web server and the refresh share one task and need no locking.
-    server[0].recv_timeout = poll_ms;
-    std.log.info("web remote: http://{f}:{}/", .{ net.ip(), http_port });
+fn control(ctx: bridge_task.Context) !void {
+    try bridge_task.start(heap.allocator(), ctx);
+    try web_start();
+    rtos.change_priority(rtos.get_current_task(), ui_priority);
 
-    var last_refresh = now_ms();
-    var mirrored: ?hue.LightState = null;
-    var button_down_since: ?u64 = null;
-    var asked = false;
-
+    // Runs forever: the remote's main loop.
+    var loop: Loop = .{ .last_refresh = now_ms() };
     while (true) {
-        var client: ?*lwip.c.netconn = null;
-        if (lwip.c_err(lwip.c.netconn_accept(server, &client))) {
-            serve(ctx, client.?) catch |err| std.log.warn("request failed: {t}", .{err});
-            _ = lwip.c.netconn_close(client);
-            _ = lwip.c.netconn_delete(client);
-        } else |err| switch (err) {
-            error.Timeout => {},
-            else => {
-                std.log.err("accept failed: {t}", .{err});
-                rtos.sleep(.from_ms(poll_ms));
-            },
-        }
-
         const t = now_ms();
-        if (config.screen) {
-            touch_ui.tick(ctx, t);
-            backlight.tick(t);
-        }
-
-        // Pick up changes made from the Hue app or a wall switch, and refresh whatever
-        // the screen just navigated to.
-        // Check `busy` first: navigation happens with the finger still down, and taking
-        // the request then would drop it.
-        const idle = !(config.screen and touch_ui.busy());
-        if (idle and (t - last_refresh >= refresh_ms or (config.screen and touch_ui.take_refresh_request()))) {
-            last_refresh = t;
-            const result = if (config.screen)
-                touch_ui.refresh(ctx)
-            else if (catalog.selected()) |e| catalog.refresh_entry(ctx, e);
-            if (result) |_| {
-                if (config.screen) touch_ui.report_refresh(true);
-            } else |err| {
-                std.log.warn("refresh failed: {t}", .{err});
-                if (config.screen) touch_ui.report_refresh(false);
-            }
-        }
-
-        if (catalog.selected()) |e| {
-            if (mirrored == null or !std.meta.eql(mirrored.?, e.state)) mirror(e.state);
-            mirrored = e.state;
-        } else if (mirrored != null) {
-            show(.{ .r = 0, .g = 0, .b = 0 });
-            mirrored = null;
-        }
-
-        if (boot_button.read() == 0) {
-            const since = button_down_since orelse t;
-            button_down_since = since;
-            if (config.screen) _ = backlight.wake(t);
-            const held = t - since;
-            if (held >= forget_hold_ms) forget();
-            if (held >= ask_hold_ms and !asked and config.screen and touch_ui.can_confirm and touch_ui.touch_ok) {
-                touch_ui.ask_forget();
-                asked = true;
-            }
-        } else if (button_down_since) |since| {
-            if (t - since < short_press_ms) _ = catalog.all_off(ctx);
-            button_down_since = null;
-            asked = false;
-        }
+        loop.tick_screen(t);
+        loop.web();
+        loop.button(t);
         if (config.screen and touch_ui.take_forget()) forget();
+        rtos.sleep(.from_ms(poll_ms));
     }
 }
 
-// ---- web remote ----
+const Loop = struct {
+    last_refresh: u64,
+    mirrored: ?hue.LightState = null,
+    button_down_since: ?u64 = null,
+    asked: bool = false,
+    /// A short BOOT press, waiting for the bridge task.
+    all_off_wanted: bool = false,
+    /// The web request this task is working on: its change waits for, or is with, the bridge
+    /// task. Others wait in `asks` until it's answered.
+    web_open: ?struct { seq: u32, ref: catalog.Ref, change: ?hue.Change } = null,
+
+    /// The screen, the bridge task's replies and the next command for it, the LED.
+    fn tick_screen(l: *Loop, t: u64) void {
+        while (bridge_task.poll()) |d| l.done(d);
+        if (config.screen) {
+            touch_ui.tick(t);
+            // The field UI's demo plays gestures by itself: no dimming under it.
+            if (!(config.demo and config.ui == .field)) backlight.tick(t);
+        }
+        l.pump(t);
+        l.mirror_selected();
+    }
+
+    /// Gives the bridge task its next command, if it's free: what a finger or the button
+    /// asked for first, then the web remote, then refreshes, then scene colours.
+    fn pump(l: *Loop, t: u64) void {
+        if (!bridge_task.idle()) return;
+        if (config.screen) if (touch_ui.next_change(t)) |c| return bridge_task.submit(.touch, c);
+        if (l.all_off_wanted) {
+            l.all_off_wanted = false;
+            return bridge_task.submit(.button, .all_off);
+        }
+        if (l.web_open) |*w| if (w.change) |c| {
+            w.change = null; // with the bridge task now
+            return bridge_task.submit(.web, .{ .change = .{ .ref = w.ref, .change = c } });
+        };
+        // Pick up changes made from the Hue app or a wall switch, and refresh whatever
+        // the screen just navigated to. Check `busy` first: navigation happens with the
+        // finger still down, and taking the request then would drop it.
+        const idle = !(config.screen and touch_ui.busy());
+        const asked = config.screen and idle and touch_ui.take_refresh_request();
+        if (idle and (asked or t - l.last_refresh >= refresh_ms)) {
+            l.last_refresh = t;
+            const cmd: ?bridge_task.Cmd = if (config.screen)
+                touch_ui.refresh_cmd()
+            else if (catalog.selected()) |e| .{ .entry = .of(e) } else null;
+            if (cmd) |c| return bridge_task.submit(.refresh, c);
+        }
+        if (config.screen) if (touch_ui.next_look()) |c| bridge_task.submit(.look, c);
+    }
+
+    fn done(l: *Loop, d: bridge_task.Done) void {
+        if (config.screen) touch_ui.done(d);
+        switch (d.owner) {
+            .refresh => if (config.screen) touch_ui.report_refresh(d.ok),
+            .web => if (l.web_open) |w| {
+                l.web_open = null;
+                answer(w.seq, if (d.ok) snapshot() else .refused);
+            },
+            .touch, .look, .button => {},
+        }
+    }
+
+    fn mirror_selected(l: *Loop) void {
+        if (catalog.selected()) |e| {
+            if (l.mirrored == null or !std.meta.eql(l.mirrored.?, e.state)) mirror(e.state);
+            l.mirrored = e.state;
+        } else if (l.mirrored != null) {
+            show(.{ .r = 0, .g = 0, .b = 0 });
+            l.mirrored = null;
+        }
+    }
+
+    fn button(l: *Loop, t: u64) void {
+        if (boot_button.read() == 0) {
+            const since = l.button_down_since orelse t;
+            l.button_down_since = since;
+            if (config.screen) _ = backlight.wake(t);
+            const held = t - since;
+            if (held >= forget_hold_ms) forget();
+            const can_ask = config.screen and touch_ui.can_confirm and touch_ui.touch_ok;
+            if (held >= ask_hold_ms and !l.asked and can_ask) {
+                touch_ui.ask_forget();
+                l.asked = true;
+            }
+        } else if (l.button_down_since) |since| {
+            if (t - since < short_press_ms) l.all_off_wanted = true;
+            l.button_down_since = null;
+            l.asked = false;
+        }
+    }
+
+    /// Takes the web task's next question, unless one is still being worked on.
+    fn web(l: *Loop) void {
+        if (l.web_open != null) return;
+        const q = asks.get_one(.non_blocking) catch return; // nothing asked
+        switch (q.ask) {
+            .state => answer(q.seq, snapshot()),
+            .forget => {
+                answer(q.seq, .forgetting);
+                forget(); // waits a moment before the reset: the web task answers meanwhile
+            },
+            .set => |change| {
+                const e = catalog.selected() orelse return answer(q.seq, .no_selection);
+                l.web_open = .{ .seq = q.seq, .ref = .of(e), .change = change };
+            },
+        }
+    }
+};
+
+// ---- web remote: its own task, asking the UI task ----
 
 const page = @embedFile("page.html");
 /// Required on every POST (any value), see `serve`.
 const remote_header = "X-Hue-Remote";
 
-fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
-    // Short timeouts (see web.Timeouts): this runs inside the UI loop, and a browser's
-    // speculative connection that sends nothing would otherwise freeze the touch screen.
+const Ask = union(enum) { state, set: hue.Change, forget };
+
+/// The selection's name and state, copied: the web task never reads the catalog.
+const Snapshot = struct {
+    name_buf: [32]u8 = undefined,
+    name_len: u8 = 0,
+    state: hue.LightState,
+
+    fn name(s: *const Snapshot) []const u8 {
+        return s.name_buf[0..s.name_len];
+    }
+};
+
+const Answer = union(enum) { state: Snapshot, no_selection, refused, forgetting };
+
+const Question = struct { seq: u32, ask: Ask };
+const Reply = struct { seq: u32, answer: Answer };
+
+var ask_buf: [1]Question = undefined;
+var answer_buf: [1]Reply = undefined;
+var asks: rtos.Queue(Question) = .init(&ask_buf);
+var answers: rtos.Queue(Reply) = .init(&answer_buf);
+
+fn snapshot() Answer {
+    const e = catalog.selected() orelse return .no_selection;
+    var s: Snapshot = .{ .state = e.state, .name_len = e.name_len };
+    @memcpy(s.name_buf[0..s.name_len], e.name());
+    return .{ .state = s };
+}
+
+/// From the UI task. The web task may have given up on this one (see `ask`): an answer it
+/// isn't waiting for is dropped there, by `seq`, so the slot must not stay taken.
+fn answer(seq: u32, a: Answer) void {
+    const r: Reply = .{ .seq = seq, .answer = a };
+    answers.put_one(r, .non_blocking) catch {
+        // The slot holds an answer the web task gave up waiting for: it's stale, drop it.
+        const stale = answers.get_one(.non_blocking) catch r;
+        std.log.warn("web answer {} dropped: its request had timed out", .{stale.seq});
+        // Just emptied, and only this task puts answers.
+        answers.put_one(r, .non_blocking) catch unreachable;
+    };
+}
+
+/// The web task's side: one question at a time, bounded. Longer than a bridge request
+/// (`hue.response_timeout_ms`) plus a refresh that may be ahead of it in the bridge task.
+fn ask(q: Ask) error{Timeout}!Answer {
+    const timeout_ms = 25_000;
+    web_seq +%= 1;
+    const seq = web_seq;
+    try asks.put_one(.{ .seq = seq, .ask = q }, .{ .after = .from_ms(1000) });
+    const start = now_ms();
+    while (now_ms() - start < timeout_ms) {
+        const left: u32 = @intCast(timeout_ms - (now_ms() - start));
+        const r = try answers.get_one(.{ .after = .from_ms(left) });
+        if (r.seq == seq) return r.answer;
+        // A late answer to a question already given up on.
+    }
+    return error.Timeout;
+}
+
+var web_seq: u32 = 0;
+
+const http_port = 80;
+/// Its deepest path is `serve`: a 1 KiB request buffer and the JSON answer.
+const web_stack_size = 8 * 1024;
+
+fn web_start() !void {
+    const server = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
+        return error.OutOfMemory;
+    try lwip.c_err(lwip.c.netconn_bind(server, null, http_port));
+    try lwip.c_err(lwip.c.netconn_listen(server));
+    _ = try rtos.spawn(heap.allocator(), web_task, .{server}, .{
+        .name = "web",
+        .stack_size = web_stack_size,
+        .priority = .lowest,
+    });
+    std.log.info("web remote: http://{f}:{}/", .{ net.ip(), http_port });
+}
+
+/// Runs forever: accept waits for the next connection with no timeout, which only holds
+/// up this task. Each request is bounded by `web.read_request`'s timeouts and by `ask`.
+fn web_task(server: *lwip.c.netconn) noreturn {
+    while (true) {
+        var client: ?*lwip.c.netconn = null;
+        if (lwip.c_err(lwip.c.netconn_accept(server, &client))) {
+            serve(client.?) catch |err| std.log.warn("request failed: {t}", .{err});
+            _ = lwip.c.netconn_close(client);
+            _ = lwip.c.netconn_delete(client);
+        } else |err| {
+            std.log.err("accept failed: {t}", .{err});
+            rtos.sleep(.from_ms(poll_ms));
+        }
+    }
+}
+
+fn serve(conn: *lwip.c.netconn) !void {
     var buf: [1024]u8 = undefined;
     const req = web.read_request(conn, &buf, .{}) catch |err| switch (err) {
         error.BadRequest => return web.respond(conn, "400 Bad Request", "text/plain", "bad request\n"),
@@ -463,40 +613,35 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
     if (try web.refuse_cross_site(conn, req, remote_header)) return;
 
     if (req.is("GET", "/")) return web.respond(conn, "200 OK", "text/html; charset=utf-8", page);
-    if (req.is("GET", "/state")) return respond_state(conn);
-    if (req.is("POST", "/forget")) {
-        try web.respond(conn, "200 OK", "text/plain", "forgetting the bridge and the username, restarting\n");
-        _ = lwip.c.netconn_close(conn);
-        forget();
-    }
+    if (req.is("GET", "/state")) return respond(conn, ask(.state));
+    if (req.is("POST", "/forget")) return respond(conn, ask(.forget));
     if (req.is("POST", "/set")) {
         const change = protocol.parse_change(req.query) catch
             return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
-        const e = catalog.selected() orelse return no_selection(conn);
-        if (!catalog.apply(ctx, e, change))
-            return web.respond(conn, "502 Bad Gateway", "text/plain", "the bridge didn't take it\n");
-        return respond_state(conn);
+        return respond(conn, ask(.{ .set = change }));
     }
     return web.respond(conn, "404 Not Found", "text/plain", "not found\n");
 }
 
-fn no_selection(conn: *lwip.c.netconn) !void {
-    return web.respond(conn, "409 Conflict", "text/plain", "pick a light or room on the screen first\n");
-}
-
-fn respond_state(conn: *lwip.c.netconn) !void {
-    const e = catalog.selected() orelse return no_selection(conn);
-    const light = e.state;
-    var body: [256]u8 = undefined;
-    const json = try std.fmt.bufPrint(&body, "{f}", .{std.json.fmt(.{
-        .name = e.name(),
-        .on = light.on,
-        .reachable = light.reachable,
-        .bri = light.bri,
-        .hue = light.hue,
-        .sat = light.sat,
-    }, .{})});
-    return web.respond(conn, "200 OK", "application/json", json);
+fn respond(conn: *lwip.c.netconn, a: error{Timeout}!Answer) !void {
+    const text = "text/plain";
+    switch (a catch return web.respond(conn, "504 Gateway Timeout", text, "no answer\n")) {
+        .no_selection => return web.respond(conn, "409 Conflict", text, "pick a light or room on the screen first\n"),
+        .refused => return web.respond(conn, "502 Bad Gateway", text, "the bridge didn't take it\n"),
+        .forgetting => return web.respond(conn, "200 OK", text, "forgetting the bridge and the username, restarting\n"),
+        .state => |*s| {
+            var body: [256]u8 = undefined;
+            const json = try std.fmt.bufPrint(&body, "{f}", .{std.json.fmt(.{
+                .name = s.name(),
+                .on = s.state.on,
+                .reachable = s.state.reachable,
+                .bri = s.state.bri,
+                .hue = s.state.hue,
+                .sat = s.state.sat,
+            }, .{})});
+            return web.respond(conn, "200 OK", "application/json", json);
+        },
+    }
 }
 
 // ---- status: on the screen and the on-board LED ----

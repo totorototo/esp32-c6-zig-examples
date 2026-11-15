@@ -304,7 +304,7 @@ fn request(bridge: Bridge, method: []const u8, path: []const u8, body: []const u
     if (body.len > 0) try write_all(conn, body);
 
     // `recv_timeout` bounds each read, not the whole answer: a bridge sending a byte every
-    // few seconds would hold the UI loop for hours without this.
+    // few seconds would hold the bridge task (and every command after) for hours.
     const start_ms = now_ms();
     var len: usize = 0;
     while (true) {

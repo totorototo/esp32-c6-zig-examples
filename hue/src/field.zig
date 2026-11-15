@@ -22,6 +22,8 @@ const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 const colourfield = @import("colourfield.zig");
 const backlight = @import("screen").backlight;
+const bridge = @import("bridge.zig");
+const outbox = @import("outbox.zig");
 const Point = ft6206.Point;
 
 const log = std.log.scoped(.field);
@@ -86,21 +88,54 @@ pub fn take_refresh_request() bool {
     return refresh_wanted;
 }
 
-pub fn refresh(ctx: catalog.Context) !void {
-    if (current()) |e| try catalog.refresh_entry(ctx, e);
+/// The room on screen, to re-read. Null just after a change: the bridge would still report
+/// the old state, and the screen would flick back.
+pub fn refresh_cmd() ?bridge.Cmd {
+    if (!box.empty() or now_t -| box.last_send < settle_ms) return null;
+    const e = current() orelse return null;
+    return .{ .entry = .of(e) };
 }
 
-pub fn tick(ctx: catalog.Context, t: u64) void {
-    if (touch_ok or config.demo) poll(ctx, t);
-    // Scene colours come from one request each: fetch the first one on screen still
-    // missing, one per tick, so the sheet fills in without stalling touch.
-    if (mode == .scenes and !gesture.down) {
-        for (sheet_scenes()) |i| if (catalog.scenes.items[i].look == .unknown) {
-            catalog.load_look(ctx, &catalog.scenes.items[i]);
-            break;
-        };
-    }
+/// After a change, the bridge reports the old state for a moment: refreshes wait this long.
+const settle_ms = 1500;
+var now_t: u64 = 0;
+
+pub fn tick(t: u64) void {
+    now_t = t;
+    if (touch_ok or config.demo) poll(t);
     render();
+}
+
+// ---- what goes to the bridge task (main.zig hands it over) ----
+
+var box: outbox.Outbox = .{};
+
+/// The next change for the bridge task. While dimming, at most one per `send_ms`, so the
+/// bridge follows the finger; colour goes on release.
+pub fn next_change(t: u64) ?bridge.Cmd {
+    const hold = gesture.down and gesture.kind == .dim and t -| box.last_send < send_ms;
+    return box.next(t, hold);
+}
+
+/// Scene colours come from one request each: the first one on the sheet still missing, one
+/// at a time, so the sheet fills in without stalling touch.
+pub fn next_look() ?bridge.Cmd {
+    if (mode != .scenes or gesture.down) return null;
+    for (sheet_scenes()) |i| {
+        const sc = &catalog.scenes.items[i];
+        if (sc.look == .unknown) return .{ .look = .of(sc.id()) };
+    }
+    return null;
+}
+
+pub fn done(d: bridge.Done) void {
+    if (d.owner == .touch) box.done();
+}
+
+/// No banner here: a change that didn't go through shows as the room going back to what
+/// it was. The outbox logs what it drops.
+fn send(e: *const catalog.Entry, c: hue.Change) void {
+    _ = box.change(e, c);
 }
 
 // ---- the room's scenes ----
@@ -159,11 +194,10 @@ const Gesture = struct {
 };
 var gesture: Gesture = .{};
 
-/// The latest change not yet sent; also what the screen previews.
+/// The gesture's change, before it goes in the outbox; also what the screen previews.
 var pending: ?hue.Change = null;
-var last_send: u64 = 0;
 
-fn poll(ctx: catalog.Context, t: u64) void {
+fn poll(t: u64) void {
     const e = current() orelse return;
     const point = read_touch(t) catch return;
 
@@ -171,7 +205,8 @@ fn poll(ctx: catalog.Context, t: u64) void {
         gesture.misses = 0;
         if (!gesture.down) {
             gesture = .{ .down = true, .start = p, .start_t = t, .last = p, .swallow = !config.demo and backlight.wake(t) };
-            gesture.start_bri = if (e.state.on) e.state.bri orelse 254 else 0;
+            const s = box.preview(e);
+            gesture.start_bri = if (s.on) s.bri orelse 254 else 0;
             return;
         }
         if (!config.demo) _ = backlight.wake(t);
@@ -207,17 +242,15 @@ fn poll(ctx: catalog.Context, t: u64) void {
         }
     } else if (gesture.down) {
         gesture.misses += 1;
-        if (gesture.misses >= 3) release(ctx, e, t);
+        if (gesture.misses >= 3) release(e, t);
     }
 
-    // While dimming, the bridge follows at most every `send_ms`; colour is sent on release.
-    if (gesture.kind == .dim) if (pending) |c| if (t - last_send >= send_ms) {
-        _ = catalog.apply(ctx, e, c);
-        last_send = t;
-    };
+    // While dimming, the latest value waits in the outbox (`next_change` throttles it);
+    // colour is sent on release.
+    if (gesture.kind == .dim) if (pending) |c| send(e, c);
 }
 
-fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
+fn release(e: *catalog.Entry, t: u64) void {
     if (gesture.swallow) {
         gesture = .{};
         return;
@@ -225,19 +258,17 @@ fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
     const dx = @as(i32, gesture.last.x) - gesture.start.x;
     const dy = @as(i32, gesture.last.y) - gesture.start.y;
     if (mode == .scenes and gesture.kind != .edge) {
-        sheet_release(ctx, dy);
+        sheet_release(dy);
         gesture = .{};
         return;
     }
     switch (gesture.kind) {
         .undecided => if (t - gesture.start_t < tap_ms + 3 * 20) {
-            _ = catalog.apply(ctx, e, .{ .on = !e.state.on });
+            send(e, .{ .on = !box.preview(e).on });
         },
         .swipe => step(dx < 0),
         // Let go on the colour field's strip: `pending` is null, nothing changes.
-        .dim, .hold => if (pending) |c| {
-            _ = catalog.apply(ctx, e, c);
-        },
+        .dim, .hold => if (pending) |c| send(e, c),
         .edge => {
             gesture = .{};
             return; // the sheet stays open
@@ -250,7 +281,7 @@ fn release(ctx: catalog.Context, e: *catalog.Entry, t: u64) void {
 
 /// On the sheet: swipe up / down pages (down from the first page closes), a tap on a band
 /// recalls its scene and closes, a tap on the header closes.
-fn sheet_release(ctx: catalog.Context, dy: i32) void {
+fn sheet_release(dy: i32) void {
     if (dy < -swipe_px) {
         if (sheet_page + 1 < sheet_pages()) sheet_page += 1;
         return;
@@ -263,7 +294,7 @@ fn sheet_release(ctx: catalog.Context, dy: i32) void {
     if (y >= sheet_header_h) {
         const band = (y - sheet_header_h) / band_h;
         const on_page = sheet_scenes();
-        if (band < on_page.len) _ = catalog.recall(ctx, &catalog.scenes.items[on_page[band]]);
+        if (band < on_page.len) _ = box.recall(&catalog.scenes.items[on_page[band]]);
     }
     mode = .room;
 }
@@ -293,7 +324,7 @@ fn render() void {
     if (mode == .scenes) return render_sheet();
     sheet_shown = null;
     const e = current() orelse return;
-    const state = preview(e.state);
+    const state = preview(e);
 
     var now: RoomShown = .{ .bg = ui.to565(bg_of(state, null)), .index = index_of(e) orelse 0, .count = entries().len, .has_scenes = room_scenes().len > 0 };
     now.id_len = e.id_len;
@@ -429,14 +460,11 @@ fn draw_band(b: usize, band: BandShown) void {
     if (band.recalled) lcd.fill(lcd.width - 26, y + band_h / 2 - 5, 10, 10, fg);
 }
 
-fn preview(state: hue.LightState) hue.LightState {
-    var v = state;
+/// The room as it will be: what waits for the bridge, then the gesture under the finger.
+fn preview(e: *const catalog.Entry) hue.LightState {
+    const v = box.preview(e);
     const c = pending orelse return v;
-    if (c.on) |x| v.on = x;
-    if (c.bri) |x| v.bri = x;
-    if (c.hue) |x| v.hue = x;
-    if (c.sat) |x| v.sat = x;
-    return v;
+    return outbox.over(v, c);
 }
 
 /// The room's colour at its brightness. Even at 1% it stays recognisably that colour: the

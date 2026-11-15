@@ -47,9 +47,19 @@ HTTPS-only, and there is no TLS stack in the firmware.
      reports the old state). Two failed refreshes in a row show BRIDGE OFFLINE along the
      bottom, over a page that stays usable, until one works.
 
-   Everything runs in one loop: `netconn_accept` with a 20 ms timeout doubles as the
-   touch polling tick, so there is no second task and no locking. A web client gets
-   150 ms to start its request, so an idle browser connection can't freeze the screen.
+   Three tasks, each the only one to touch what it owns, so there is no locking:
+   - the UI task (main.zig): the catalog of lights and rooms, the screen, the settings,
+     the LED and the button. It ticks every 20 ms and never waits on the network, so a
+     slow or dead bridge can't freeze the touch screen.
+   - the bridge task (bridge.zig): every request to the bridge, one command at a time.
+     The UI hands it the next command when it's free (a finger first, then the button,
+     the web remote, refreshes, scene colours), and applies what it read when it's done.
+     A change shows on screen at once and goes back if the bridge refuses it
+     (outbox.zig); changes to one light merge while they wait, so a slide sends only its
+     latest value.
+   - the web task: the remote's connections. It asks the UI task for the state or a
+     change and waits for the answer (25 s at most); it never reads the catalog itself.
+
    (Wi-Fi reconnects by itself, in ../common's own task.)
 
 **When something is wrong**, the board says so on the screen and the LED, and never
