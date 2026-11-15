@@ -15,7 +15,6 @@ columns common/src/screen/ft6206.zig 1
 columns common/src/screen/ili9341.zig 5
 columns common/src/web.zig 3
 columns hue/build.zig 9
-columns hue/src/backlight.zig 1
 columns hue/src/catalog.zig 8
 columns hue/src/colourfield.zig 2
 columns hue/src/field.zig 23

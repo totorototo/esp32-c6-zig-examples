@@ -1,89 +1,21 @@
 //! What the remote remembers across reboots, in the flash's `nvs` partition (namespace
-//! "hue", ESP-IDF's NVS format):
+//! "hue"), through ../common's `settings` store:
 //!
 //!   bridge_ip   the bridge's IPv4 address, found by mDNS or given with -Dhue_ip
 //!   user        the API username from pairing: a bridge credential, stored unencrypted
 //!   selected    the light or room last opened: "l3", "g1", ...
 //!
-//! Only the main task uses the store (Wi-Fi keeps its own config in RAM here), so there is
-//! no locking. If the partition is missing or unreadable, everything still works, but
-//! nothing is remembered.
-const std = @import("std");
-const microzig = @import("microzig");
-const flash = microzig.hal.flash;
-const rtos = microzig.hal.rtos;
-const verify = @import("verify").verify;
-
-const log = std.log.scoped(.settings);
-
+//! Only the main task uses the store (Wi-Fi keeps its own config in RAM here).
 pub const Key = enum { bridge_ip, user, selected };
 
-const namespace = "hue";
+/// 64: a username is 40 characters, an address 15, a selection a few.
+const store = @import("settings").Store(.{
+    .namespace = "hue",
+    .Key = Key,
+    .value_max = 64,
+});
 
-// A global: the store holds a 4 KiB page buffer.
-var store: flash.Nvs = undefined;
-var handle: ?flash.Nvs.Handle = null;
-
-/// The task that opened the store. Nothing here locks: only that task may use it.
-var owner: ?*rtos.Task = null;
-
-/// Negative space for "only the main task uses the store": a second task would race the
-/// NVS page buffer without a lock.
-fn check_owner() void {
-    verify(owner == null or owner.? == rtos.get_current_task(), "settings used from one task");
-}
-
-pub fn init() void {
-    owner = rtos.get_current_task();
-    const partition = (flash.partition_table.find_data(.nvs, null) catch null) orelse {
-        log.warn("no nvs partition: settings won't be remembered", .{});
-        return;
-    };
-    store.init(partition.region(), partition.size) catch |err| {
-        log.warn("nvs partition unusable ({t}): settings won't be remembered", .{err});
-        return;
-    };
-    handle = store.open(namespace, .read_write) catch |err| {
-        log.warn("nvs namespace not opened ({t}): settings won't be remembered", .{err});
-        return;
-    };
-}
-
-/// The stored value, copied into `buf`, or null when there is none.
-pub fn get(key: Key, buf: []u8) ?[]const u8 {
-    check_owner();
-    const h = handle orelse return null;
-    return h.get_str(@tagName(key), buf) catch |err| switch (err) {
-        error.NotFound => null,
-        else => {
-            log.warn("reading {t} failed: {t}", .{ key, err });
-            return null;
-        },
-    };
-}
-
-/// Stores `value` unless it is already the stored one, so repeated calls cost no flash
-/// writes.
-pub fn set(key: Key, value: []const u8) void {
-    check_owner();
-    const h = handle orelse return;
-    var buf: [64]u8 = undefined;
-    if (get(key, &buf)) |old| if (std.mem.eql(u8, old, value)) return;
-    h.set_str(@tagName(key), value) catch |err| {
-        log.warn("saving {t} failed: {t}", .{ key, err });
-        return;
-    };
-    // Checked on the way back too, so a bad write shows now rather than as a lost pairing
-    // at the next boot.
-    const stored = get(key, &buf) orelse "";
-    if (!std.mem.eql(u8, stored, value)) log.err("saving {t}: reads back different", .{key});
-}
-
-pub fn erase(key: Key) void {
-    check_owner();
-    const h = handle orelse return;
-    h.erase_key(@tagName(key)) catch |err| switch (err) {
-        error.NotFound => {},
-        else => log.warn("erasing {t} failed: {t}", .{ key, err }),
-    };
-}
+pub const init = store.init;
+pub const get = store.get;
+pub const set = store.set;
+pub const erase = store.erase;

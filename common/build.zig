@@ -57,6 +57,11 @@ pub fn add_net(b: *std.Build, mz_dep: *std.Build.Dependency, fw: anytype, opts: 
     net.addImport("verify", verify);
     fw.add_app_import("net", net, .{ .depend_on_microzig = true });
 
+    // Strings in the flash's NVS partition, one namespace per sample (src/settings.zig).
+    const settings = b.createModule(.{ .root_source_file = common.path("src/settings.zig") });
+    settings.addImport("verify", verify);
+    fw.add_app_import("settings", settings, .{ .depend_on_microzig = true });
+
     // HTTPS on top of it (TLS 1.3, see src/https.zig for what the firmware must provide).
     // Only compiled into firmware that imports it.
     const https = b.createModule(.{ .root_source_file = common.path("src/https.zig") });

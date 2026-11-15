@@ -1,7 +1,7 @@
 # common — code shared by the Wi-Fi samples (`weblight`, `hue`, `tls`, `netatmo`)
 
 Not an example on its own. `add_net` adds the `net`, `https` and `uart_log` modules; `add_screen`
-adds `screen` (ILI9341 + FT6206). The `net` module:
+adds `screen` (ILI9341 + FT6206, and `screen.backlight`, PWM on GPIO3). The `net` module:
 
 - `net.up(allocator)`: joins the Wi-Fi network from the example's `config` (`ssid`,
   `password`) and waits for a DHCP address; `net.ip()` formats it. It retries until the
@@ -15,6 +15,9 @@ adds `screen` (ILI9341 + FT6206). The `net` module:
   (`comptime { _ = net.exports; }`) so the symbols are exported.
 - `verify` (its own module): `verify(ok, "what")`, an assertion that stays in ReleaseSmall,
   for invariants whose failure would corrupt memory (see STYLE.md).
+- `settings` (its own module): `Store(.{ .namespace, .Key, .value_max })`, strings in the
+  flash's NVS partition. `set` returns false when a value isn't stored (it reads every write
+  back); one task only, checked with `verify`. `hue` and `netatmo` each wrap one.
 - `uart_log` (its own module): `.logFn = @import("uart_log").log` in `std_options`. Locks
   across tasks, and writes unlocked when interrupts are off (a trap, a panic), where waiting
   for the lock would freeze the board.

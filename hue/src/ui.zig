@@ -145,12 +145,7 @@ pub fn invalidate() void {
 /// Full-screen message (boot, pairing, errors), up to two lines split at '\n'.
 pub fn message(msg: []const u8, color: lcd.Color) void {
     invalidate();
-    lcd.fill(0, 0, lcd.width, lcd.height, bg);
-    var lines = std.mem.splitScalar(u8, msg, '\n');
-    var y: u16 = 130;
-    while (lines.next()) |line| : (y += 30) {
-        text_centered(.{ .x = 0, .y = y, .w = lcd.width, .h = 16 }, line, 2, color, bg);
-    }
+    screen.message(msg, color, bg);
 }
 
 /// A strip over the bottom of the page, for what the user should know but can't act on

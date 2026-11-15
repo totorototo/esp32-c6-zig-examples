@@ -7,6 +7,7 @@
 //! Logs go to UART0 (115200 baud), so they show up in the Wokwi serial monitor.
 const std = @import("std");
 const microzig = @import("microzig");
+const config = @import("config");
 const net = @import("net");
 const lwip = net.lwip;
 const web = net.web;
@@ -79,8 +80,17 @@ fn init_led() void {
     led = .init(.init(spi, .single_one_wire, null), hal.drivers.clock_device());
 }
 
+/// Writes the state to the LED, scaled by `-Dled_level`: the page and /state keep the
+/// colour as chosen, only the LED is dimmed.
 fn apply_state() !void {
-    try led.write(&.{if (state.on) state.color else .{ .r = 0, .g = 0, .b = 0 }});
+    const c = state.color;
+    const v: u16 = config.led_level;
+    const shown: Color = if (state.on) .{
+        .r = @intCast(@as(u16, c.r) * v / 255),
+        .g = @intCast(@as(u16, c.g) * v / 255),
+        .b = @intCast(@as(u16, c.b) * v / 255),
+    } else .{ .r = 0, .g = 0, .b = 0 };
+    try led.write(&.{shown});
 }
 
 // ---- HTTP ----

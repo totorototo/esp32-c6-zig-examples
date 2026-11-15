@@ -74,6 +74,8 @@ const Gesture = struct {
     start_t: u64 = 0,
     misses: u8 = 0,
     start_set: f32 = 19,
+    /// The touch woke the backlight: ignored, so a brush past a dark screen sets nothing.
+    swallow: bool = false,
 };
 var g: Gesture = .{};
 /// The setpoint being dragged to, shown instead of the room's.
@@ -91,10 +93,13 @@ fn poll(t: u64) void {
     if (point) |p| {
         g.misses = 0;
         if (!g.down) {
-            g = .{ .down = true, .start = p, .last = p, .start_t = t, .start_set = r.setpoint orelse 19 };
+            const woke = !config.demo and screen.backlight.wake(t);
+            g = .{ .down = true, .start = p, .last = p, .start_t = t, .start_set = r.setpoint orelse 19, .swallow = woke };
             return;
         }
+        if (!config.demo) _ = screen.backlight.wake(t); // a long drag keeps it lit
         g.last = p;
+        if (g.swallow) return;
         const dx = @as(i32, p.x) - g.start.x;
         const dy = @as(i32, p.y) - g.start.y;
         switch (g.kind) {
@@ -118,6 +123,7 @@ fn poll(t: u64) void {
 
 fn release(r: *energy.Room, t: u64) void {
     defer g = .{};
+    if (g.swallow) return;
     switch (g.kind) {
         .undecided => if (t - g.start_t < tap_ms + 60 and r.mode.eql("manual")) {
             send(r, null);
@@ -167,13 +173,7 @@ var shown: ?Shown = null;
 
 pub fn message(text: []const u8, colour: Rgb) void {
     shown = null;
-    const bg = lcd.rgb(16, 16, 20);
-    lcd.fill(0, 0, lcd.width, lcd.height, bg);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    var y: u16 = 130;
-    while (lines.next()) |line| : (y += 30) {
-        screen.text_centered(.{ .x = 0, .y = y, .w = lcd.width, .h = 16 }, line, 2, screen.to565(colour), bg);
-    }
+    screen.message(text, screen.to565(colour), lcd.rgb(16, 16, 20));
 }
 
 fn render() void {

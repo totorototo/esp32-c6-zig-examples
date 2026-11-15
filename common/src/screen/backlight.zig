@@ -1,7 +1,10 @@
 //! The screen's backlight, on LEDC PWM (the panel's LED pin on GPIO3): full while the
-//! remote is in use, dimmed after `idle_ms` without a touch. The touch that wakes it only
-//! wakes it: a dimmed remote on a wall gets brushed past, and that shouldn't switch the
-//! lights.
+//! remote is in use, dimmed after `idle_ms` without a touch. The touch that wakes it should
+//! only wake it (`wake` says so): a dimmed remote on a wall gets brushed past, and that
+//! shouldn't switch the lights or move a setpoint.
+//!
+//! Takes LEDC timer 0 and channel 0. Without `init`, GPIO3 floats and the panel stays dark
+//! (or flickers): every sample with the screen calls it.
 const microzig = @import("microzig");
 const hal = microzig.hal;
 
@@ -23,7 +26,11 @@ pub fn init() void {
     channel.connect_pin(pin);
     hal.ledc.apply(.apb_clk);
     // 5 kHz: above what eyes or the camera of a phone see flicker at.
-    timer.apply(.{ .clock_config = hal.clock_config, .frequency = 5000, .precision = precision }, .apb_clk);
+    timer.apply(.{
+        .clock_config = hal.clock_config,
+        .frequency = 5000,
+        .precision = precision,
+    }, .apb_clk);
     channel.apply(.{ .timer = timer, .initial_duty = full });
 }
 

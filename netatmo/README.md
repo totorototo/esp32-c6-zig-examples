@@ -17,6 +17,9 @@ cloud relay, no Home Assistant. Netatmo has no local API, so this is the only wa
    then returned to its schedule (`mode=home`).
 
 Logs go to UART0 (115200 baud) and end with `netatmo test: PASS` or `netatmo test: FAIL`.
+FAIL is only for what needs a person (no credentials, a refused token, no such home or room).
+Anything that can pass (no internet yet after a power cut, DNS, a timeout, an HTTP 5xx) is
+retried, 10 s after the first failure, doubling up to every 5 minutes.
 
 ## Credentials
 
@@ -59,7 +62,8 @@ Expected log:
 
 ## The screen
 
-With the 2.8" ILI9341 + FT6206 touch screen, wired as in `../hue`, and on by default
+With the 2.8" ILI9341 + FT6206 touch screen, wired as in `../hue` (backlight on GPIO3,
+dimmed after 30 s without a touch; the touch that wakes it does nothing else), and on by default
 (`-Dscreen=false` to go without), the board becomes a thermostat remote after the first
 read. One room at a time, the whole display painted by its temperature, cold blue through
 teal and amber to red:

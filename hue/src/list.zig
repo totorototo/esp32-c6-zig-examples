@@ -16,7 +16,7 @@ const hue = @import("hue.zig");
 const catalog = @import("catalog.zig");
 const ui = @import("ui.zig");
 const colourfield = @import("colourfield.zig");
-const backlight = @import("backlight.zig");
+const backlight = @import("screen").backlight;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 const Point = ft6206.Point;
@@ -132,7 +132,8 @@ fn entered() void {
 fn select(e: *const catalog.Entry) void {
     catalog.select(e);
     var buf: [9]u8 = undefined;
-    settings.set(.selected, std.fmt.bufPrint(&buf, "{c}{s}", .{ @as(u8, if (e.kind == .light) 'l' else 'g'), e.id() }) catch return);
+    // Not saved: the next boot opens on the first room, nothing worse.
+    _ = settings.set(.selected, std.fmt.bufPrint(&buf, "{c}{s}", .{ @as(u8, if (e.kind == .light) 'l' else 'g'), e.id() }) catch return);
 }
 
 /// Opens the page of `e` (at boot: the one open last), above the home list it belongs to.

@@ -10,6 +10,7 @@
 //! `rmt test: FAIL`. The animation then runs forever.
 const std = @import("std");
 const microzig = @import("microzig");
+const config = @import("config");
 
 const hal = microzig.hal;
 const gpio = hal.gpio;
@@ -44,9 +45,11 @@ fn uart_log(
 const led_pin = gpio.num(8);
 const ring_pin = gpio.num(10);
 const ring_len = 16;
-/// Per-channel LED level. Wokwi draws the colour as plain RGB, so a level that is bright on a
-/// real WS2812 (16 is plenty) looks black in the simulator. Lower it on hardware.
-const brightness = 255;
+/// Per-channel LED level, `-Dled_level` (default 40, as in ../hue). Wokwi draws the colour as
+/// plain RGB, so a level that is bright on a real WS2812 looks black there: build with
+/// `-Dled_level=255` to see the ring in the simulator. The self-check measures timing, not
+/// colour, so it passes at any level.
+const brightness = config.led_level;
 
 // 40 MHz crystal, undivided: 25 ns ticks, whatever the CPU clock is.
 const rmt_config: rmt.Config = .{ .clock_config = hal.clock_config };

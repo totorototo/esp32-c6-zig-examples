@@ -7,7 +7,7 @@ Fetches MicroZig from the `esp32-c6` branch of
 [totorototo/microzig](https://github.com/totorototo/microzig), pinned in `build.zig.zon`, with
 its `modules/lwip` and `modules/foundation-libc` (see the top-level README). Wi-Fi bring-up,
 the lwIP glue (from MicroZig's `tcp_server` example, with `LWIP_SO_RCVTIMEO` turned on) and the
-HTTP helpers live in [`../common`](../common), shared with `hue`.
+HTTP helpers live in [`../common`](../common), shared with `hue`, `tls` and `netatmo`.
 
 ## Build
 
@@ -15,6 +15,8 @@ HTTP helpers live in [`../common`](../common), shared with `hue`.
     zig build -Doptimize=ReleaseSmall -Dssid=MyWifi -Dpassword=secret   # your network
 
 Credentials are build options, so they never end up in the source. Needs Zig 0.17.1.
+`-Dled_level=1..255` (default 40) scales the LED, as in `hue`: the page and `/state` keep
+the colour as picked. Wokwi draws the raw value, so use `-Dled_level=255` there.
 
 ## HTTP API (port 80)
 

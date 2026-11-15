@@ -11,6 +11,9 @@ top-level README).
 
     zig build -Doptimize=ReleaseSmall
 
+`-Dled_level=1..255` (default 40) sets the LED's brightness, as in `hue`. Wokwi draws the raw
+value, so dim levels look black there: use `-Dled_level=255` in the simulator.
+
 Needs Zig 0.17.1. Output in `zig-out/firmware/`: `blinky.elf` and `blinky.bin` (ESP app image).
 
 regz prints warnings during the first build (unknown arch `RV32IMAC`, a few skipped

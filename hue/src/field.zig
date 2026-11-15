@@ -21,7 +21,7 @@ const lcd = @import("screen").lcd;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
 const colourfield = @import("colourfield.zig");
-const backlight = @import("backlight.zig");
+const backlight = @import("screen").backlight;
 const Point = ft6206.Point;
 
 const log = std.log.scoped(.field);
@@ -64,7 +64,8 @@ pub fn open(e: *const catalog.Entry) void {
     catalog.select(e);
     refresh_wanted = true;
     var buf: [9]u8 = undefined;
-    settings.set(.selected, std.fmt.bufPrint(&buf, "{c}{s}", .{ @as(u8, if (e.kind == .light) 'l' else 'g'), e.id() }) catch return);
+    // Not saved: the next boot opens on the first room, nothing worse.
+    _ = settings.set(.selected, std.fmt.bufPrint(&buf, "{c}{s}", .{ @as(u8, if (e.kind == .light) 'l' else 'g'), e.id() }) catch return);
 }
 
 fn step(forward: bool) void {

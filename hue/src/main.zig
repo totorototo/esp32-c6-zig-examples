@@ -32,7 +32,7 @@ const touch_ui = switch (config.ui) {
 const ili9341 = @import("screen").lcd;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
-const backlight = @import("backlight.zig");
+const backlight = @import("screen").backlight;
 const lwip = net.lwip;
 
 const hal = microzig.hal;
@@ -197,7 +197,8 @@ const retry_ms = 10_000;
 fn try_bridge(fixed: ?hue.Bridge) ?hue.Bridge {
     if (fixed) |b| {
         if (!reach(b)) return null;
-        settings.set(.bridge_ip, b.host());
+        // Not saved: the next boot searches again, which only costs time.
+        _ = settings.set(.bridge_ip, b.host());
         return b;
     }
 
@@ -217,7 +218,7 @@ fn try_bridge(fixed: ?hue.Bridge) ?hue.Bridge {
     } orelse return null;
     std.log.info("found a bridge at {s}", .{found.host()});
     if (!reach(found)) return null;
-    settings.set(.bridge_ip, found.host());
+    _ = settings.set(.bridge_ip, found.host()); // not saved: the next boot searches again
     return found;
 }
 
@@ -257,8 +258,11 @@ fn pair(bridge: hue.Bridge) ![]const u8 {
             @memcpy(user_buf[0..user.len], user);
             // A bridge credential: saved in flash and logged once, never shown on screen.
             // The log line is for Wokwi, whose flash starts blank on every run.
-            settings.set(.user, user);
-            std.log.info("paired, username saved. To skip pairing where flash isn't kept (Wokwi): -Dhue_user={s}", .{user});
+            const saved = settings.set(.user, user);
+            if (!saved) std.log.warn("username NOT saved: the next boot will pair again", .{});
+            std.log.info("paired{s}. To skip pairing where flash isn't kept (Wokwi): -Dhue_user={s}", .{
+                if (saved) ", username saved" else "", user,
+            });
             status(.ok, "PAIRED");
             return user_buf[0..user.len];
         }

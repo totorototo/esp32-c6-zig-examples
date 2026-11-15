@@ -1,6 +1,7 @@
 //! The touch screen shared by the screen examples: a 2.8" ILI9341 240x320 SPI TFT (`lcd`)
 //! with an FT6206/FT6236 capacitive touch controller on I2C (`touch`), a 5x7 font that
-//! scales up to 8x, colour conversions, and text drawing.
+//! scales up to 8x, colour conversions, text drawing, and the backlight (`backlight`, PWM on
+//! the panel's LED pin, GPIO3).
 //!
 //! An example gets it with `common.add_screen(b, fw)` in its build.zig.
 const std = @import("std");
@@ -8,6 +9,7 @@ pub const lcd = @import("screen/ili9341.zig");
 pub const touch = @import("screen/ft6206.zig");
 pub const font = @import("screen/font.zig");
 pub const colour = @import("screen/colour.zig");
+pub const backlight = @import("screen/backlight.zig");
 
 pub const Point = touch.Point;
 pub const Rgb = colour.Rgb;
@@ -32,6 +34,17 @@ pub const Rect = struct {
 
 pub fn to565(c: Rgb) lcd.Color {
     return lcd.rgb(c.r, c.g, c.b);
+}
+
+/// A whole-screen message: `text` centred, one line per `\n`, at scale 2 (startup steps,
+/// errors). The caller forgets what its own page had drawn, since this paints over it.
+pub fn message(s: []const u8, fg: lcd.Color, back: lcd.Color) void {
+    lcd.fill(0, 0, lcd.width, lcd.height, back);
+    var lines = std.mem.splitScalar(u8, s, '\n');
+    var y: u16 = 130;
+    while (lines.next()) |line| : (y += 30) {
+        text_centered(.{ .x = 0, .y = y, .w = lcd.width, .h = 16 }, line, 2, fg, back);
+    }
 }
 
 // ---- text: 5x7 font, each glyph sent as one window with its background ----

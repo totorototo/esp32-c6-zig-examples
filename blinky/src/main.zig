@@ -2,6 +2,7 @@
 //! and logs over the USB-Serial-JTAG port.
 const std = @import("std");
 const microzig = @import("microzig");
+const config = @import("config");
 const hal = microzig.hal;
 const gpio = hal.gpio;
 const WS2812 = microzig.drivers.led.WS2812;
@@ -20,10 +21,12 @@ comptime {
 const led_pin = gpio.num(8);
 const spi_bus = hal.spi.instance.SPI2;
 
+/// `-Dled_level` (default 40): see build.zig.
+const level = config.led_level;
 const colors = [_]Color{
-    .{ .r = 16, .g = 0, .b = 0 },
-    .{ .r = 0, .g = 16, .b = 0 },
-    .{ .r = 0, .g = 0, .b = 16 },
+    .{ .r = level, .g = 0, .b = 0 },
+    .{ .r = 0, .g = level, .b = 0 },
+    .{ .r = 0, .g = 0, .b = level },
 };
 const off: Color = .{ .r = 0, .g = 0, .b = 0 };
 

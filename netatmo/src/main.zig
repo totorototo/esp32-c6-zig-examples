@@ -39,7 +39,8 @@ pub const microzig_options = net.microzig_options;
 
 const api = "api.netatmo.com";
 
-// Touch screen wiring, as in ../hue: SPI2 for the ILI9341, I2C on GPIO22/23 for the FT6206.
+// Touch screen wiring, as in ../hue: SPI2 for the ILI9341, I2C on GPIO22/23 for the FT6206,
+// the backlight (the panel's LED pin) on GPIO3, dimmed by PWM (screen.backlight).
 const gpio = hal.gpio;
 const screen_pins: screen.lcd.Pins = .{
     .sck = gpio.num(19),
@@ -52,6 +53,7 @@ const screen_pins: screen.lcd.Pins = .{
 pub fn main() !void {
     std.log.info("netatmo on ESP32-C6", .{});
     if (config.screen) {
+        screen.backlight.init();
         screen.lcd.init(screen_pins);
         if (screen.touch.init(gpio.num(22), gpio.num(23))) {
             thermo.touch_ok = true;
@@ -71,12 +73,46 @@ pub fn main() !void {
 
     try net.up(heap.allocator());
 
-    run() catch |err| {
-        std.log.err("netatmo test: FAIL ({t})", .{err});
-        status("ERROR\nSEE THE LOG", .{ .r = 255, .g = 90, .b = 70 });
-        return;
-    };
+    // Never gives up on what can pass: after a power cut the Wi-Fi is often back before the
+    // internet, and a remote stopped at its first failed request stays dead until reset.
+    var backoff_ms: u32 = retry_first_ms;
+    while (true) {
+        if (run()) |_| break else |err| {
+            if (permanent(err)) {
+                std.log.err("netatmo test: FAIL ({t})", .{err});
+                status("ERROR\nSEE THE LOG", .{ .r = 255, .g = 90, .b = 70 });
+                return;
+            }
+            std.log.warn("netatmo: {t}: retrying in {} s", .{ err, backoff_ms / 1000 });
+            status("NO ANSWER\nRETRYING", .{ .r = 255, .g = 180, .b = 60 });
+            rtos.sleep(.from_ms(backoff_ms));
+            backoff_ms = @min(backoff_ms * 2, retry_max_ms);
+        }
+    }
     if (config.screen and config.test_room.len == 0) ui_loop();
+}
+
+/// Doubling from 10 s to 5 min between attempts: an outage on Netatmo's side
+/// (or the WAN) can last hours; a fixed short delay would hammer the API, which rate-limits
+/// per app, and a long fixed one would make a brief blip cost minutes.
+const retry_first_ms = 10_000;
+const retry_max_ms = 5 * 60_000;
+
+/// Errors that the same attempt will hit again: a build option or an account that needs a
+/// person. Everything else (DNS, TLS, timeouts, an HTTP 5xx, no time yet) can pass.
+fn permanent(err: anyerror) bool {
+    return switch (err) {
+        error.NoCredentials,
+        error.TokenRefused,
+        error.TokenTooLong,
+        error.NoHome,
+        error.NoSuchRoom,
+        error.BadTestTemp,
+        error.SetpointRefused,
+        error.SetpointNotApplied,
+        => true,
+        else => false,
+    };
 }
 
 fn status(text: []const u8, colour: screen.Rgb) void {
@@ -131,6 +167,8 @@ fn ui_loop() noreturn {
     while (true) {
         const t = now_ms();
         thermo.tick(t);
+        // The demo's scripted finger doesn't wake it, so it stays lit there.
+        if (config.screen and !config.demo) screen.backlight.tick(t);
         if (t - last_refresh >= refresh_ms) {
             last_refresh = t;
             refresh_status() catch |err| std.log.warn("refresh failed: {t}", .{err});

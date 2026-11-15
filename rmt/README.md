@@ -24,6 +24,9 @@ out of spec for the WS2812; it usually works with a short wire.
 
     zig build -Doptimize=ReleaseSmall
 
+`-Dled_level=1..255` (default 40) sets the LEDs' brightness, as in `hue`. Wokwi draws the raw
+value, so dim levels look black there (the self-check measures timing, so it passes at any level): use `-Dled_level=255` in the simulator.
+
 Needs Zig 0.17.1. Output in `zig-out/firmware/`: `rmt.elf` and `rmt.bin` (ESP app image).
 The regz warnings printed on the first build are harmless.
 

@@ -14,6 +14,10 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "ssid", b.option([]const u8, "ssid", "Wi-Fi SSID") orelse "Wokwi-GUEST");
     options.addOption([]const u8, "password", b.option([]const u8, "password", "Wi-Fi password (empty: open network)") orelse "");
+    // On-board LED level, 1..255, as in ../hue: the page's colour is scaled by it. A WS2812
+    // at full power is blinding on a desk, but Wokwi draws the raw value: use 255 there.
+    const led_level = b.option(u8, "led_level", "On-board LED level 1..255 (default: 40)");
+    options.addOption(u8, "led_level", led_level orelse 40);
 
     const mz_dep = b.dependency("microzig", .{});
     const mb = MicroBuild.init(b, mz_dep) orelse return;

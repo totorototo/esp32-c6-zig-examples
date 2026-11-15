@@ -11,7 +11,7 @@
     [ "esp:RX", "$serialMonitor:TX", "", [] ],
     [ "lcd1:VCC", "esp:3V3", "red", [] ],
     [ "lcd1:GND", "esp:GND.1", "black", [] ],
-    [ "lcd1:LED", "esp:3V3", "red", [] ],
+    [ "lcd1:LED", "esp:3", "red", [] ],
     [ "lcd1:SCK", "esp:19", "orange", [] ],
     [ "lcd1:MOSI", "esp:18", "blue", [] ],
     [ "lcd1:CS", "esp:20", "violet", [] ],
