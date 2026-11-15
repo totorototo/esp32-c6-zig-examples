@@ -4,6 +4,8 @@
 //! buffer once a refresh returns.
 const std = @import("std");
 const hue = @import("hue.zig");
+/// The bridge's scene record, as `scenes.zig` reads it (catalog.Scene is the kept copy).
+const SceneInfo = @import("scenes.zig").Scene;
 
 const log = std.log.scoped(.catalog);
 
@@ -253,7 +255,7 @@ pub const SceneList = struct {
         return l.items[0..l.len];
     }
 
-    pub fn add(l: *SceneList, info: @import("scenes.zig").Scene) void {
+    pub fn add(l: *SceneList, info: SceneInfo) void {
         if (info.recycle or info.name.len == 0) return;
         const group_id = info.group orelse "";
         if (l.len == max_scenes) {

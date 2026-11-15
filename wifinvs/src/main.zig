@@ -9,6 +9,9 @@
 //! `wifinvs test: FAIL`.
 const std = @import("std");
 const microzig = @import("microzig");
+/// ../common's UART0 logger and chip reset.
+const uart_log = @import("uart_log");
+const system = @import("system");
 
 const hal = microzig.hal;
 const flash = hal.flash;
@@ -27,7 +30,7 @@ pub const std_options = microzig.std_options(.{
         .{ .scope = .esp_radio_osi, .level = .err },
     },
     // The Wi-Fi driver and main both log: the shared logger locks (../common).
-    .logFn = @import("uart_log").log,
+    .logFn = uart_log.log,
 });
 
 pub const microzig_options: microzig.Options = .{
@@ -149,7 +152,7 @@ pub fn main() !void {
         }
         std.log.info("first boot: config saved, resetting", .{});
         rtos.sleep(.from_ms(50)); // let the UART drain
-        @import("system").reset(); // the whole chip, radio included (../common)
+        system.reset(); // the whole chip, radio included
     }
 
     expect(std.mem.eql(u8, saved, ssid), "the station ssid survived the reset");

@@ -7,6 +7,8 @@
 //! Wiring: SDA = GPIO22, SCL = GPIO23, address 0x3C, 3V3 and GND.
 const std = @import("std");
 const microzig = @import("microzig");
+/// ../common's UART0 logger.
+const uart_log = @import("uart_log");
 const font = @import("font.zig");
 
 const hal = microzig.hal;
@@ -24,7 +26,7 @@ const Framebuffer = mdf.display.ssd1306.Framebuffer;
 pub const panic = microzig.panic;
 
 pub const std_options = microzig.std_options(.{
-    .logFn = @import("uart_log").log_unlocked, // one task: no lock (../common)
+    .logFn = uart_log.log_unlocked, // one task: no lock
 });
 
 comptime {

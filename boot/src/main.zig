@@ -10,6 +10,8 @@
 //! `boot test: FAIL`, then a line every second.
 const std = @import("std");
 const microzig = @import("microzig");
+/// ../common's UART0 logger.
+const uart_log = @import("uart_log");
 const config = @import("config");
 
 const hal = microzig.hal;
@@ -18,7 +20,7 @@ const time = hal.time;
 pub const panic = microzig.panic;
 
 pub const std_options = microzig.std_options(.{
-    .logFn = @import("uart_log").log_unlocked, // one task: no lock (../common)
+    .logFn = uart_log.log_unlocked, // one task: no lock
 });
 
 comptime {

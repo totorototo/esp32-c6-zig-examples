@@ -32,6 +32,8 @@ const touch_ui = switch (config.ui) {
 const ili9341 = @import("screen").lcd;
 const ft6206 = @import("screen").touch;
 const settings = @import("settings.zig");
+const protocol = @import("protocol.zig");
+const system = @import("system");
 const backlight = @import("screen").backlight;
 const lwip = net.lwip;
 
@@ -289,7 +291,7 @@ fn forget() noreturn {
 
 fn restart() noreturn {
     rtos.sleep(.from_ms(500)); // let the log and the screen catch up
-    @import("system").reset(); // the whole chip, radio included (../common)
+    system.reset(); // the whole chip, radio included
 }
 
 // ---- demo: no Wi-Fi, no bridge, made-up rooms (-Ddemo=true) ----
@@ -320,7 +322,7 @@ fn demo() noreturn {
     catalog.groups.items[0].set_members(&.{ "2", "4", "6", "9" }); // Salon
     catalog.groups.items[1].set_members(&.{"7"}); // Bureau
     catalog.groups.items[2].set_members(&.{ "3", "8" }); // Chambre
-    const scenes = [_]struct { []const u8, []const u8, []const u8, @import("screen").Rgb, u8 }{
+    const scenes = [_]struct { []const u8, []const u8, []const u8, ui.Rgb, u8 }{
         .{ "s1", "Détente", "1", .{ .r = 255, .g = 160, .b = 80 }, 150 },
         .{ "s2", "Lecture", "1", .{ .r = 255, .g = 225, .b = 180 }, 254 },
         .{ "s3", "Horizon", "1", .{ .r = 255, .g = 110, .b = 60 }, 190 },
@@ -468,7 +470,7 @@ fn serve(ctx: catalog.Context, conn: *lwip.c.netconn) !void {
         forget();
     }
     if (req.is("POST", "/set")) {
-        const change = @import("protocol.zig").parse_change(req.query) catch
+        const change = protocol.parse_change(req.query) catch
             return web.respond(conn, "400 Bad Request", "text/plain", "bad parameter\n");
         const e = catalog.selected() orelse return no_selection(conn);
         if (!catalog.apply(ctx, e, change))

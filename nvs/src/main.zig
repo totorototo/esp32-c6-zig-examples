@@ -9,6 +9,9 @@
 //! `nvs test: FAIL`.
 const std = @import("std");
 const microzig = @import("microzig");
+/// ../common's UART0 logger and chip reset.
+const uart_log = @import("uart_log");
+const system = @import("system");
 
 const hal = microzig.hal;
 const flash = hal.flash;
@@ -17,7 +20,7 @@ const time = hal.time;
 pub const panic = microzig.panic;
 
 pub const std_options = microzig.std_options(.{
-    .logFn = @import("uart_log").log_unlocked, // one task: no lock (../common)
+    .logFn = uart_log.log_unlocked, // one task: no lock
 });
 
 comptime {
@@ -83,7 +86,7 @@ pub fn main() !void {
         try settings.set_blob("blob", &blob);
         std.log.info("first boot: values stored, resetting", .{});
         time.sleep_ms(50); // let the UART drain
-        @import("system").reset(); // the whole chip, radio included (../common)
+        system.reset(); // the whole chip, radio included
     }
 
     // Second boot (or later, on hardware): everything must have survived the reset.
