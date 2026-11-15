@@ -11,7 +11,7 @@ pub const Update = struct {
 };
 
 pub fn parse(query: []const u8) error{BadParameter}!Update {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var update: Update = .{};
     var it = std.mem.tokenizeScalar(u8, query, '&');
     while (it.next()) |pair| {

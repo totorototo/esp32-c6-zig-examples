@@ -28,8 +28,10 @@ adds `screen` (ILI9341 + FT6206, and `screen.backlight`, PWM on GPIO3). The `net
   over 256 bytes is cut and marked ` [cut]`, not dropped.
 - `net.std_options(extra_scopes)` and `net.microzig_options`: the firmware root's options.
   The latter already hands received frames to lwIP (`net.on_packet_received`).
-- HTTPS (`https`): each read times out after 10 s, the whole exchange after 60 s, so a
-  server dripping bytes can't hold the task.
+- HTTPS (`https`): each read and each write times out after 10 s, the whole exchange after
+  60 s, so a server dripping bytes (or not taking them) can't hold the task. Connecting
+  isn't bounded: lwIP's netconn has no connect timeout, and TCP gives up after its SYN
+  retries.
 
 From an example's `build.zig`:
 

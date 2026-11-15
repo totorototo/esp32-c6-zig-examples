@@ -37,5 +37,8 @@
 // Receive timeouts: a stalled peer can't block a single-task server, and accept() can
 // double as a loop tick (hue).
 #define LWIP_SO_RCVTIMEO 1
+// Send timeouts: a peer that stops taking data (zero window) can't block a write for good.
+// Connecting has no timeout in netconn: TCP gives up after its SYN retries.
+#define LWIP_SO_SNDTIMEO 1
 
 #endif

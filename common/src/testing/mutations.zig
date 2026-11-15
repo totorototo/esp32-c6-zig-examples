@@ -4,8 +4,9 @@
 //! `each(fixture, check)` calls `check` on every prefix of `fixture` (each length from 0 to
 //! the whole), then on every copy of it with one byte changed (each of its 8 bits flipped,
 //! then set to 0x00 and to 0xFF). A parser may return an error or a value for any of them,
-//! but must never panic: with `@setRuntimeSafety(true)`, a panic here is an out-of-bounds
-//! read or an overflow that the board would hit on the same bytes.
+//! but must never panic: a panic here is an out-of-bounds read or an overflow that the
+//! board would hit on the same bytes. The Debug run catches them anywhere, std included;
+//! the ReleaseSmall run only in `@setRuntimeSafety(true)` scopes, like the board.
 //!
 //! Available to every host test as `@import("mutations")` (see `common.add_tests`). Import
 //! it inside the `test` block, so firmware builds never look for it.

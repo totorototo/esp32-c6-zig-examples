@@ -59,7 +59,8 @@ pub const microzig_options: microzig.Options = .{
 };
 
 var netif: lwip.c.netif = undefined;
-var netif_ready = false;
+/// Set by `up` once `netif` exists; read by the Wi-Fi driver's receive path, another task.
+var netif_ready: std.atomic.Value(bool) = .init(false);
 var ip_ready: rtos.Signal(void) = .{};
 
 /// Joins the configured network and waits for an IPv4 address.
@@ -78,7 +79,7 @@ pub fn up(gpa: std.mem.Allocator) !void {
         netif_init,
         lwip.c.tcpip_input,
     );
-    netif_ready = true;
+    netif_ready.store(true, .release);
     try lwip.c_err(lwip.c.netifapi_netif_common(&netif, null, lwip.c.dhcp_start));
 
     try radio.wifi.apply(.{
@@ -167,14 +168,18 @@ pub fn ip() IpFormatter {
 pub const IpFormatter = struct {
     addr: lwip.c.ip_addr_t,
 
+    /// Formats the octets itself: `ip4addr_ntoa` writes into one static buffer, which two
+    /// tasks formatting an address at once would share.
     pub fn format(self: IpFormatter, writer: *std.Io.Writer) !void {
-        try writer.writeAll(std.mem.sliceTo(lwip.c.ip4addr_ntoa(@as(*const lwip.c.ip4_addr_t, @ptrCast(&self.addr))), 0));
+        var o: [4]u8 = undefined;
+        std.mem.writeInt(u32, &o, self.addr.u_addr.ip4.addr, .little); // network order in memory
+        try writer.print("{}.{}.{}.{}", .{ o[0], o[1], o[2], o[3] });
     }
 };
 
 /// Called from the Wi-Fi driver for every received frame; hands it to lwIP.
 pub fn on_packet_received(comptime _: radio.wifi.Interface, data: []const u8) void {
-    if (!netif_ready) return;
+    if (!netif_ready.load(.acquire)) return;
     const pbuf: *lwip.c.struct_pbuf = lwip.c.pbuf_alloc(lwip.c.PBUF_RAW, @intCast(data.len), lwip.c.PBUF_POOL) orelse {
         log.err("failed to allocate receive pbuf", .{});
         return;
@@ -221,7 +226,7 @@ fn netif_output(_: [*c]lwip.c.struct_netif, pbuf_c: [*c]lwip.c.struct_pbuf) call
 
     var off: usize = 0;
     while (off < pbuf.tot_len) {
-        const cnt = lwip.c.pbuf_copy_partial(pbuf, packet_buf[off..].ptr, @as(u15, @intCast(pbuf.tot_len - off)), @as(u15, @intCast(off)));
+        const cnt = lwip.c.pbuf_copy_partial(pbuf, packet_buf[off..].ptr, @intCast(pbuf.tot_len - off), @intCast(off));
         if (cnt == 0) {
             log.err("failed to copy network packet", .{});
             return lwip.c.ERR_BUF;
@@ -230,7 +235,7 @@ fn netif_output(_: [*c]lwip.c.struct_netif, pbuf_c: [*c]lwip.c.struct_pbuf) call
     }
 
     radio.wifi.send_packet(.sta, packet_buf[0..pbuf.tot_len]) catch |err| {
-        log.err("failed to send packet: {}", .{err});
+        log.err("failed to send packet: {t}", .{err});
         return lwip.c.ERR_IF;
     };
     return lwip.c.ERR_OK;

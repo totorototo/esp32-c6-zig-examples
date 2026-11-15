@@ -15,7 +15,7 @@ pub const Request = struct {
 
     /// The value of header `name` (case-insensitive), or null.
     pub fn header(req: Request, name: []const u8) ?[]const u8 {
-        @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+        @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
         var lines = std.mem.splitSequence(u8, req.headers, "\r\n");
         while (lines.next()) |line| {
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
@@ -31,7 +31,7 @@ pub const ParseError = error{BadRequest};
 /// Parses `head`: the request line and the headers, without the blank line that ends them.
 /// The result's slices point into `head`.
 pub fn parse(head: []const u8) ParseError!Request {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     const line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
     var it = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
     const method = it.next() orelse return error.BadRequest;

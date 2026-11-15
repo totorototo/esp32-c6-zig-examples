@@ -22,15 +22,21 @@ them (`socket_write.len >= TlsClient.min_buffer_len`, `auth_buf` against `"Beare
 the token, `packet_buf` against the MTU). A wrong size is then a build error, not a board
 that spins forever in ReleaseSmall.
 
-**Assertions must survive ReleaseSmall.** `std.debug.assert` compiles to nothing there, so
-it only checks the host tests. For an invariant whose failure would corrupt memory, use
+**Assertions must survive ReleaseSmall.** `std.debug.assert` isn't checked there: it becomes
+`unreachable`, which the optimizer may assume true, so a false assert is undefined
+behaviour, not a skipped line. It only checks in the Debug host tests. For an invariant whose failure would corrupt memory, use
 `verify(ok, "what")` from `common/src/verify.zig`: it stops the board with a message.
 Assertions are for programmer errors. Bad input from the network or a device is an error to
 return, never a `verify`.
 
 **Parsers of network input keep their bounds checks:** `@setRuntimeSafety(true)` at the top
 of every function that reads bytes from outside (about 1 KB of flash per firmware). It only
-covers its own scope, so helpers it calls need their own.
+covers its own scope, so helpers it calls need their own. That includes the standard
+library: `std.json`, `std.mem.indexOf`, `std.fmt.parseInt` and `std.Io.Reader` run
+unchecked in ReleaseSmall whatever the caller says. Only the Debug run of the mutation
+tests catches an out-of-bounds read inside them; on the board it would be undefined
+behaviour. (ReleaseSafe would check everything, at about +60% flash: 1.24 → 1.96 MB for
+netatmo. We ship ReleaseSmall.)
 
 **Check at both ends.** What is written is checked where it is read back: settings are read
 back after every NVS write, and the boot sample checks memory layout from inside the image.

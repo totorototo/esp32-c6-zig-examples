@@ -23,7 +23,7 @@ pub fn Text(comptime n: usize) type {
         /// For display text: cut to fit, at a UTF-8 character boundary (a cut in the middle
         /// of `é` would leave an invalid byte for the font to draw).
         pub fn set(t: *Self, s: []const u8) void {
-            @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+            @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
             var len = @min(s.len, n);
             while (len > 0 and len < s.len and s[len] & 0xC0 == 0x80) len -= 1;
             t.len = @intCast(len);
@@ -112,7 +112,7 @@ pub const Error = error{ BadResponse, OutOfMemory, BufferUnderrun, ValueTooLong 
 /// `{"body":{"homes":[{"id","name","rooms":[...],"modules":[...],...}]},"status":"ok"}`.
 /// Reads the first home (or the one with `want_id`) into `home`. Returns false if none.
 pub fn read_homesdata(src: anytype, scratch: std.mem.Allocator, want_id: ?[]const u8, home: *Home) Error!bool {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var found = false;
     try expect(src, .object_begin);
     while (try key(src, scratch)) |k| {
@@ -156,7 +156,7 @@ pub fn read_homesdata(src: anytype, scratch: std.mem.Allocator, want_id: ?[]cons
 
 /// Reads one home object, `{` already consumed by `next_in_array`.
 fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     while (try key(src, scratch)) |k| {
         if (std.mem.eql(u8, k, "id")) {
             try h.id.set_exact(try string(src, scratch));
@@ -188,7 +188,7 @@ fn read_home(src: anytype, scratch: std.mem.Allocator, h: *Home) Error!void {
 
 /// `{"body":{"home":{"id","rooms":[{"id","therm_measured_temperature",...}],"modules":[...]}}}`.
 pub fn read_homestatus(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     try expect(src, .object_begin);
     while (try key(src, scratch)) |k| {
         if (!std.mem.eql(u8, k, "body")) {
@@ -216,7 +216,7 @@ pub fn read_homestatus(src: anytype, scratch: std.mem.Allocator, home: *Home) Er
 }
 
 fn read_room_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var s: Room = .{};
     var heating: ?u8 = null;
     while (try key(src, scratch)) |k| {
@@ -244,7 +244,7 @@ fn read_room_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error
 }
 
 fn read_module_status(src: anytype, scratch: std.mem.Allocator, home: *Home) Error!void {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var id: Text(18) = .{};
     var reachable = false;
     var battery: Text(10) = .{};

@@ -1,166 +1,90 @@
-//! Reading an HTTP/1.1 response: status line, headers, and a body framed by Content-Length,
-//! chunked transfer encoding, or the end of the connection. Pure, tested on the host.
+//! Reading an HTTP/1.x response head, one line at a time: the status line, then the header
+//! lines `https.open` needs. Pure, tested on the host; `https.read_head` feeds it the lines.
+//!
+//! Requests go out as HTTP/1.0, so a server may not answer with chunked encoding: the body
+//! is plain bytes, ending at Content-Length or when the server closes.
 const std = @import("std");
 
-pub const Head = struct {
-    status: u16,
-    /// Where the body starts in the buffer.
-    body_start: usize,
-    content_length: ?usize,
-    chunked: bool,
+pub const Error = error{
+    BadResponse,
+    /// Not allowed in an answer to HTTP/1.0, and not decoded here.
+    ChunkedResponse,
 };
 
-pub const Error = error{BadResponse};
+/// The status code of a status line ("HTTP/1.1 200 OK", without its CRLF).
+pub fn status(line: []const u8) Error!u16 {
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
+    // "HTTP/1.x" + " " + three digits, then an optional reason.
+    if (line.len < 12 or !std.mem.startsWith(u8, line, "HTTP/1.") or line[8] != ' ')
+        return error.BadResponse;
+    if (line.len > 12 and line[12] != ' ') return error.BadResponse;
+    for (line[9..12]) |d| if (!std.ascii.isDigit(d)) return error.BadResponse;
+    return std.fmt.parseInt(u16, line[9..12], 10) catch unreachable; // three digits
+}
 
-/// Parses the head if `buf` holds all of it, else returns null (read more).
-pub fn parse_head(buf: []const u8) Error!?Head {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
-    const end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
-    var lines = std.mem.splitSequence(u8, buf[0..end], "\r\n");
-    const status_line = lines.next() orelse return error.BadResponse;
-    // "HTTP/1.1 200 OK"
-    if (status_line.len < 12 or !std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadResponse;
-    const status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return error.BadResponse;
-    var head: Head = .{ .status = status, .body_start = end + 4, .content_length = null, .chunked = false };
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+/// What the head says about the body.
+pub const Head = struct {
+    content_length: ?usize = null,
+
+    /// Takes one header line (without its CRLF). Lines that aren't `name: value` and
+    /// headers that don't matter here are skipped.
+    pub fn add(head: *Head, line: []const u8) Error!void {
+        @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
         const name = line[0..colon];
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            head.content_length = std.fmt.parseInt(usize, value, 10) catch return error.BadResponse;
+            const n = std.fmt.parseInt(usize, value, 10) catch return error.BadResponse;
+            // Two that disagree: which one frames the body is anyone's guess.
+            if (head.content_length) |old| if (old != n) return error.BadResponse;
+            head.content_length = n;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            head.chunked = std.ascii.findIgnoreCase(value, "chunked") != null;
+            if (std.ascii.findIgnoreCase(value, "chunked") != null) return error.ChunkedResponse;
         }
     }
-    return head;
-}
-
-/// With the response read so far in `buf`, the body (chunked bodies decoded in place), or
-/// null while more bytes are needed. `at_eof`: the server closed the connection.
-pub fn body(buf: []u8, head: Head, at_eof: bool) Error!?[]u8 {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
-    const raw = buf[head.body_start..];
-    if (head.chunked) return dechunk(raw, at_eof);
-    if (head.content_length) |n| {
-        if (raw.len < n) return if (at_eof) error.BadResponse else null;
-        return raw[0..n];
-    }
-    // Neither: the body runs to the end of the connection.
-    return if (at_eof) raw else null;
-}
-
-/// Decodes chunked transfer encoding in place: `<hex size>[;ext]\r\n<data>\r\n` ... `0\r\n\r\n`.
-/// Returns null while incomplete. Decoding writes behind the read position, so it can run
-/// again on the same buffer once more bytes arrive only if nothing was decoded: callers call
-/// it once per read, on the undecoded bytes, and a null result leaves `raw` untouched.
-fn dechunk(raw: []u8, at_eof: bool) Error!?[]u8 {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
-    // First pass: check the whole body is there, without modifying it.
-    var in: usize = 0;
-    while (true) {
-        const line_end = std.mem.indexOfPos(u8, raw, in, "\r\n") orelse return incomplete(at_eof);
-        const size = try chunk_size(raw[in..line_end]);
-        in = line_end + 2;
-        if (size == 0) break; // trailers, if any, are not needed
-        // Checked: a huge size would wrap `in + size + 2` past this test in ReleaseSmall.
-        const chunk_end = std.math.add(usize, in, size) catch return error.BadResponse;
-        if (raw.len < chunk_end or raw.len - chunk_end < 2) return incomplete(at_eof);
-        if (!std.mem.eql(u8, raw[in + size ..][0..2], "\r\n")) return error.BadResponse;
-        in += size + 2;
-    }
-    // Second pass: compact the chunks' data to the front.
-    in = 0;
-    var out: usize = 0;
-    while (true) {
-        const line_end = std.mem.indexOfPos(u8, raw, in, "\r\n").?;
-        const size = chunk_size(raw[in..line_end]) catch unreachable;
-        in = line_end + 2;
-        if (size == 0) return raw[0..out];
-        std.mem.copyForwards(u8, raw[out..][0..size], raw[in..][0..size]);
-        out += size;
-        in += size + 2;
-    }
-}
-
-fn chunk_size(line: []const u8) Error!usize {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
-    const hex = std.mem.trim(u8, line[0 .. std.mem.indexOfScalar(u8, line, ';') orelse line.len], " \t");
-    if (hex.len == 0) return error.BadResponse;
-    return std.fmt.parseInt(usize, hex, 16) catch error.BadResponse;
-}
-
-fn incomplete(at_eof: bool) Error!?[]u8 {
-    return if (at_eof) error.BadResponse else null;
-}
+};
 
 const testing = std.testing;
 
-test "content-length" {
-    var buf = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}".*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expectEqual(@as(u16, 200), head.status);
-    try testing.expectEqualStrings("{\"ok\":true}", (try body(&buf, head, false)).?);
-    // One byte short: wait for more, or fail at the end of the connection.
-    try testing.expectEqual(null, try body(buf[0 .. buf.len - 1], head, false));
-    try testing.expectError(error.BadResponse, body(buf[0 .. buf.len - 1], head, true));
+test status {
+    try testing.expectEqual(@as(u16, 200), try status("HTTP/1.1 200 OK"));
+    try testing.expectEqual(@as(u16, 400), try status("HTTP/1.0 400"));
+    try testing.expectError(error.BadResponse, status("SSH-2.0-OpenSSH"));
+    try testing.expectError(error.BadResponse, status("HTTP/1.1 2x0 OK"));
+    // parseInt alone would take a sign.
+    try testing.expectError(error.BadResponse, status("HTTP/1.1 +20 OK"));
+    try testing.expectError(error.BadResponse, status("HTTP/1.1 2000 OK"));
+    try testing.expectError(error.BadResponse, status("HTTP/1.1  200"));
+    try testing.expectError(error.BadResponse, status("HTTP/1.1 20"));
 }
 
-test "chunked" {
-    var buf = "HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\n\r\n4\r\n{\"a\"\r\nb;ext=1\r\n:[1,2,3,4]}\r\n0\r\n\r\n".*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expect(head.chunked);
-    try testing.expectEqualStrings("{\"a\":[1,2,3,4]}", (try body(&buf, head, false)).?);
+test "Head.add" {
+    var head: Head = .{};
+    try head.add("Content-Type: application/json");
+    try head.add("not a header");
+    try testing.expectEqual(null, head.content_length);
+    try head.add("content-length:  11 ");
+    try testing.expectEqual(@as(?usize, 11), head.content_length);
+    try head.add("Content-Length: 11"); // repeated, same value
+    try testing.expectError(error.BadResponse, head.add("Content-Length: 12"));
+    try testing.expectError(error.BadResponse, head.add("Content-Length: -1"));
+    try testing.expectError(error.BadResponse, head.add("Content-Length: 99999999999999999999999"));
+    try testing.expectError(error.ChunkedResponse, head.add("Transfer-Encoding: gzip, Chunked"));
 }
 
-test "chunked, incomplete" {
-    var buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\nb\r\n:[1,".*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expectEqual(null, try body(&buf, head, false));
-    try testing.expectError(error.BadResponse, body(&buf, head, true));
-}
-
-test "to the end of the connection" {
-    var buf = "HTTP/1.0 400 Bad\r\n\r\n{\"error\":1}".*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expectEqual(@as(u16, 400), head.status);
-    try testing.expectEqual(null, try body(&buf, head, false));
-    try testing.expectEqualStrings("{\"error\":1}", (try body(&buf, head, true)).?);
-}
-
-test "bad heads" {
-    try testing.expectEqual(null, try parse_head("HTTP/1.1 200 OK\r\nContent-Le"));
-    try testing.expectError(error.BadResponse, parse_head("SSH-2.0-OpenSSH\r\n\r\n"));
-    try testing.expectError(error.BadResponse, parse_head("HTTP/1.1 2x0 OK\r\n\r\n"));
-    var buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expectError(error.BadResponse, body(&buf, head, false));
-}
-
-test "chunk size that would overflow" {
-    // Just under usize's maximum, so `in + size` overflows whatever usize's width: on the
-    // C6 it is 32 bits, on the host 64.
-    const size = std.fmt.comptimePrint("{x}", .{std.math.maxInt(usize) - 1});
-    var buf = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++ size ++ "\r\nab\r\n0\r\n\r\n").*;
-    const head = (try parse_head(&buf)).?;
-    try testing.expectError(error.BadResponse, body(&buf, head, false));
-    // One digit more than usize holds: rejected by the size parser itself.
-    var too_long = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1" ++ size ++ "\r\nab\r\n0\r\n\r\n").*;
-    try testing.expectError(error.BadResponse, body(&too_long, (try parse_head(&too_long)).?, false));
-}
-
-test "truncated and corrupted responses never panic" {
+test "corrupted heads never panic" {
     const mutations = @import("mutations");
-    for ([_][]const u8{
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n" ++
-            "{\"ok\":true}",
-        "HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\n\r\n" ++
-            "4\r\n{\"a\"\r\nb;ext=1\r\n:[1,2,3,4]}\r\n0\r\n\r\n",
-    }) |fixture| try mutations.each(fixture, struct {
-        fn check(input: []u8) void {
-            const head = (parse_head(input) catch return) orelse return;
-            _ = body(input, head, false) catch return;
-            // Decoding may have compacted `input`: run the end-of-connection case on that.
-            _ = body(input, head, true) catch return;
+    try mutations.each("HTTP/1.1 200 OK", struct {
+        fn check(line: []u8) void {
+            _ = status(line) catch return;
         }
     }.check);
+    for ([_][]const u8{ "Content-Length: 11", "Transfer-Encoding: chunked" }) |fixture| {
+        try mutations.each(fixture, struct {
+            fn check(line: []u8) void {
+                var head: Head = .{};
+                head.add(line) catch return;
+            }
+        }.check);
+    }
 }

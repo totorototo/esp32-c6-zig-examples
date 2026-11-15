@@ -75,7 +75,7 @@ pub fn state_body(buf: []u8, change: Change) error{NoSpaceLeft}![]const u8 {
 
 /// The web remote's `/set` query: `on=0|1`, `bri`, `hue`, `sat`, any subset.
 pub fn parse_change(query: []const u8) error{BadParameter}!Change {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var change: Change = .{};
     var it = std.mem.tokenizeScalar(u8, query, '&');
     while (it.next()) |kv| {

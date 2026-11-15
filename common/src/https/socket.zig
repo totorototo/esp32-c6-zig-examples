@@ -17,7 +17,7 @@ pub fn resolve(host: [:0]const u8) !lwip.c.ip_addr_t {
 
 /// Sends `request` to `addr:port` over UDP and copies the first reply into `reply`.
 pub fn udp_exchange(addr: lwip.c.ip_addr_t, port: u16, request: []const u8, reply: []u8, timeout_ms: u32) !usize {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_UDP, 0, null) orelse
         return error.OutOfMemory;
     defer _ = lwip.c.netconn_delete(conn);
@@ -51,20 +51,24 @@ pub const Tcp = struct {
     pending: ?*lwip.c.netbuf = null,
     pending_off: u16 = 0,
     closed: bool = false,
-    /// Uptime (us) by which the whole exchange must be over. `recv_timeout` bounds each
-    /// read only: a peer sending a byte every few seconds would otherwise hold the
-    /// connection, and the task, for as long as it likes.
+    /// Uptime (us) by which the whole exchange must be over. `recv_timeout` and
+    /// `send_timeout` bound one read or write each: a peer sending or taking a byte every
+    /// few seconds would otherwise hold the connection, and the task, for as long as it
+    /// likes.
     deadline_us: u64,
-    /// The per-read timeout `connect` was given; reads near the deadline get less.
-    read_timeout_ms: u32,
+    /// The per-read and per-write timeout `connect` was given; near the deadline, less.
+    io_timeout_ms: u32,
 
     reader: std.Io.Reader,
     writer: std.Io.Writer,
 
     pub const Timeouts = struct {
-        /// For connecting, and for each read.
-        read_ms: u32,
-        /// For everything from `connect` to the last byte read.
+        /// For each read and each write.
+        io_ms: u32,
+        /// For everything from `connect` to the last byte read. Connecting itself is not
+        /// bounded by either: netconn has no connect timeout, and TCP gives up only after
+        /// its SYN retries (lwIP's TCP_SYNMAXRTX, over a minute). The deadline then fails
+        /// the first read or write.
         total_ms: u32,
     };
 
@@ -77,17 +81,18 @@ pub const Tcp = struct {
         write_buffer: []u8,
         timeouts: Timeouts,
     ) !void {
-        verify(timeouts.read_ms <= timeouts.total_ms, "a read fits in the whole exchange");
+        // 0 would mean "no timeout" to lwIP.
+        verify(timeouts.io_ms > 0, "reads and writes time out");
+        verify(timeouts.io_ms <= timeouts.total_ms, "a read fits in the whole exchange");
         const start_us = uptime_us();
         const conn = lwip.c.netconn_new_with_proto_and_callback(lwip.c.NETCONN_TCP, 0, null) orelse
             return error.OutOfMemory;
         errdefer _ = lwip.c.netconn_delete(conn);
-        conn[0].recv_timeout = @intCast(timeouts.read_ms);
         try lwip.c_err(lwip.c.netconn_connect(conn, &addr, port));
         t.* = .{
             .conn = conn,
             .deadline_us = start_us + @as(u64, timeouts.total_ms) * 1000,
-            .read_timeout_ms = timeouts.read_ms,
+            .io_timeout_ms = timeouts.io_ms,
             .reader = .{ .vtable = &.{ .stream = stream }, .buffer = read_buffer, .seek = 0, .end = 0 },
             .writer = .{ .vtable = &.{ .drain = drain }, .buffer = write_buffer },
         };
@@ -101,17 +106,11 @@ pub const Tcp = struct {
     }
 
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+        @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
         const t: *Tcp = @alignCast(@fieldParentPtr("reader", r));
         if (t.pending == null) {
             if (t.closed) return error.EndOfStream;
-            const now = uptime_us();
-            if (now >= t.deadline_us) {
-                log.warn("the peer is too slow: over the time allowed for the whole exchange", .{});
-                return error.ReadFailed;
-            }
-            const left_ms: u32 = @intCast(@min((t.deadline_us - now) / 1000 + 1, t.read_timeout_ms));
-            t.conn.recv_timeout = @intCast(left_ms);
+            t.conn.recv_timeout = t.timeout_ms() orelse return error.ReadFailed;
             var nb: ?*lwip.c.netbuf = null;
             lwip.c_err(lwip.c.netconn_recv(t.conn, &nb)) catch |err| switch (err) {
                 error.ConnectionClosed => {
@@ -154,11 +153,36 @@ pub const Tcp = struct {
         return n + last.len * splat;
     }
 
+    /// With a `send_timeout` set, lwIP writes what it can before the timeout and says how
+    /// much (it refuses the call without `written`), so this loops until all of it is out.
     fn send(t: *Tcp, bytes: []const u8) std.Io.Writer.Error!void {
-        if (bytes.len == 0) return;
-        lwip.c_err(lwip.c.netconn_write_partly(t.conn, bytes.ptr, bytes.len, lwip.c.NETCONN_COPY, null)) catch |err| {
-            log.warn("send failed: {t}", .{err});
-            return error.WriteFailed;
-        };
+        var off: usize = 0;
+        while (off < bytes.len) {
+            t.conn.send_timeout = @intCast(t.timeout_ms() orelse return error.WriteFailed);
+            var written: usize = 0;
+            const rest = bytes[off..];
+            lwip.c_err(lwip.c.netconn_write_partly(t.conn, rest.ptr, rest.len, lwip.c.NETCONN_COPY, &written)) catch |err| {
+                log.warn("send failed: {t}", .{err});
+                return error.WriteFailed;
+            };
+            if (written == 0) {
+                log.warn("send failed: the peer took nothing for {} ms", .{t.conn.send_timeout});
+                return error.WriteFailed;
+            }
+            verify(written <= rest.len, "lwIP wrote at most what it was given");
+            off += written;
+        }
+    }
+
+    /// The timeout for the next read or write: `io_timeout_ms`, or less near the deadline.
+    /// Null once the deadline has passed. Never 0, which lwIP takes as "wait forever".
+    fn timeout_ms(t: *const Tcp) ?u32 {
+        const now = uptime_us();
+        if (now >= t.deadline_us) {
+            log.warn("the peer is too slow: over the time allowed for the whole exchange", .{});
+            return null;
+        }
+        const left_ms = (t.deadline_us - now) / 1000 + 1;
+        return @intCast(@min(left_ms, t.io_timeout_ms));
     }
 };

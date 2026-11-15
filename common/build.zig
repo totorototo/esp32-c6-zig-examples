@@ -99,8 +99,9 @@ pub fn add_screen(b: *std.Build, fw: anytype) void {
 /// test added later is picked up too. A file with tests must therefore compile on the host
 /// on its own: keep tests in pure modules.
 ///
-/// Each file runs twice: in Debug, and in ReleaseSmall like the firmware, where asserts are
-/// gone and only `@setRuntimeSafety(true)` code keeps its checks. Each can import
+/// Each file runs twice: in Debug, where every check is on (std's too), and in ReleaseSmall
+/// like the firmware, where asserts become assumptions and only `@setRuntimeSafety(true)`
+/// scopes keep their checks. Each can import
 /// `mutations` (src/testing/mutations.zig), the negative-space input generator.
 pub fn add_tests(b: *std.Build, step: *std.Build.Step) void {
     const common = b.dependency("common", .{}).builder;

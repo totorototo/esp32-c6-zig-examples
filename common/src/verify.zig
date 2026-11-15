@@ -1,7 +1,8 @@
 //! An assertion that stays in ReleaseSmall, as a `verify` module (see STYLE.md).
 //!
-//! `std.debug.assert` compiles to nothing in ReleaseSmall, which is what the firmware ships
-//! as, so an invariant checked with it is only checked by the host tests. `verify` keeps the
+//! In ReleaseSmall, which the firmware ships as, `std.debug.assert` is `unreachable`: not
+//! checked, and assumed true by the optimizer, so a false one is undefined behaviour. Only
+//! the Debug host tests check it. `verify` keeps the
 //! check: a broken invariant stops the board with a message, instead of corrupting memory
 //! and failing somewhere else later. For programmer errors only. Bad input from the network
 //! or a device is an error to return, not a reason to stop.

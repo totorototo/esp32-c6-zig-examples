@@ -21,8 +21,8 @@ const lwip = net.lwip;
 const verify = @import("verify").verify;
 pub const sntp = @import("https/sntp.zig");
 pub const socket = @import("https/socket.zig");
-/// Response framing (Content-Length, chunked) for callers that read raw HTTP themselves.
-pub const http = @import("https/http.zig");
+/// The response head's parser (pure, host-tested), fed line by line by `read_head`.
+const http = @import("https/http.zig");
 pub const TlsClient = @import("https/tls_client.zig");
 const tls = std.crypto.tls;
 
@@ -105,7 +105,8 @@ comptime {
 pub const Stream = struct {
     status: u16,
     content_length: ?usize,
-    /// The body, decrypted. Ends at Content-Length or when the server closes.
+    /// The body, decrypted. Not cut at `content_length`: reading past it waits for the
+    /// server to close (`request` stops there; a JSON reader stops at the closing brace).
     body: *std.Io.Reader,
 
     pub fn close(_: *Stream) void {
@@ -130,7 +131,9 @@ var conn_client: TlsClient = undefined;
 /// bytes that a streaming parser (std.json.Reader) can read straight from `Stream.body`,
 /// without buffering a response that may be bigger than the free RAM.
 pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers: []const Header, body: []const u8) !Stream {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
+    // First: everything below, the certificate bundle included, lives in statics.
+    verify(!stream_open, "one HTTPS connection at a time");
     const unix = now() orelse return error.NoTime;
 
     var fba: std.heap.FixedBufferAllocator = .init(&bundle_mem);
@@ -143,9 +146,8 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
     }
 
     const addr = try socket.resolve(host);
-    verify(!stream_open, "one HTTPS connection at a time");
     try conn_tcp.connect(addr, 443, &socket_read, &socket_write, .{
-        .read_ms = 10_000,
+        .io_ms = 10_000,
         // A handshake takes about a second on the chip, ~9 s in Wokwi, and the biggest
         // answer (Netatmo's homesdata, tens of KiB) a few more: a minute is generous.
         .total_ms = 60_000,
@@ -156,6 +158,8 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
 
     var entropy: [TlsClient.Options.entropy_len]u8 = undefined;
     microzig.hal.rng.read(&entropy);
+    // The key share's seed: wiped like the key share itself (see tls_client.zig).
+    defer std.crypto.secureZero(u8, &entropy);
     var lock: std.Io.RwLock = .init;
     var alert: tls.Alert = undefined;
     const t0 = microzig.hal.time.get_time_since_boot().to_us();
@@ -189,32 +193,21 @@ pub fn open(host: [:0]const u8, method: []const u8, target: []const u8, headers:
 }
 
 /// The status line and the headers `open` needs, leaving `r` at the body. Line by line:
-/// each fits the TLS read buffer.
+/// each fits the TLS read buffer. The parsing is `http.zig`'s, tested on the host.
 fn read_head(r: *std.Io.Reader) !Stream {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
-    const status_line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
-    const http_ok = status_line.len >= 12 and std.mem.startsWith(u8, status_line, "HTTP/1.");
-    if (!http_ok) return error.BadResponse;
-    var stream: Stream = .{
-        .status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return error.BadResponse,
-        .content_length = null,
-        .body = r,
-    };
+    const status = try http.status(try take_line(r));
+    var head: http.Head = .{};
     // A limit on everything: a server that never ends its head can't keep us here.
     for (0..header_lines_max) |_| {
-        const line = std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
+        const line = try take_line(r);
         if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = line[0..colon];
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            stream.content_length = std.fmt.parseInt(usize, value, 10) catch
-                return error.BadResponse;
-        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.findIgnoreCase(value, "chunked") != null) return error.ChunkedResponse;
-        }
+        try head.add(line);
     } else return error.BadResponse; // more header lines than any real answer has
-    return stream;
+    return .{ .status = status, .content_length = head.content_length, .body = r };
+}
+
+fn take_line(r: *std.Io.Reader) ![]const u8 {
+    return std.mem.trimEnd(u8, try r.takeDelimiterInclusive('\n'), "\r\n");
 }
 
 /// Netatmo sends about 15.
@@ -230,7 +223,7 @@ pub fn request(
     body: []const u8,
     buf: []u8,
 ) !Response {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var stream = try open(host, method, target, headers, body);
     defer stream.close();
     const want = stream.content_length orelse buf.len;

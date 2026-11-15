@@ -35,7 +35,9 @@ export fn lwip_assert_core_locked() void {
     if (c.lock_tcpip_core == null) return;
 
     const mutex: *rtos.Mutex = @ptrCast(@alignCast(c.lock_tcpip_core));
-    std.debug.assert(mutex.locked == rtos.get_current_task());
+    // A verify, not an assert: in ReleaseSmall an assert is an assumption, and lwIP's state
+    // touched without the core lock is the memory corruption it would let through.
+    verify(mutex.locked == rtos.get_current_task(), "lwIP core used with its lock held");
 }
 
 export fn lwip_rand() u32 {
@@ -86,7 +88,7 @@ export fn sys_mutex_unlock(ptr: *c.sys_mutex_t) void {
 const MailboxElement = ?*anyopaque;
 const Mailbox = rtos.Queue(MailboxElement);
 
-export fn sys_mbox_new(ptr: *c.sys_mbox_t, size: i32) c.err_t {
+export fn sys_mbox_new(ptr: *c.sys_mbox_t, size: c_int) c.err_t {
     const buffer = gpa.alloc(MailboxElement, @intCast(size)) catch {
         log.warn("failed to allocate mailbox buffer", .{});
         return c.ERR_MEM;
@@ -202,7 +204,7 @@ fn task_wrapper(
 /// Without TCPIP_THREAD_STACKSIZE in lwipopts.h, lwIP asks for 0 bytes.
 const default_thread_stack = 4096;
 
-export fn sys_thread_new(name: [*:0]u8, thread: c.lwip_thread_fn, arg: ?*anyopaque, stacksize: c_int, prio: c_int) c.sys_thread_t {
+export fn sys_thread_new(name: [*:0]const u8, thread: c.lwip_thread_fn, arg: ?*anyopaque, stacksize: c_int, prio: c_int) c.sys_thread_t {
     _ = prio;
 
     return rtos.spawn(gpa, task_wrapper, .{ thread, arg }, .{

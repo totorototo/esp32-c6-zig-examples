@@ -19,7 +19,7 @@ pub const Timeouts = struct {
 
 /// Reads the request line and headers; any body is ignored.
 pub fn read_request(conn: *lwip.c.netconn, buf: []u8, timeouts: Timeouts) !Request {
-    @setRuntimeSafety(true); // parses network input: keep bounds checks in ReleaseSmall
+    @setRuntimeSafety(true); // network input: this scope stays checked in ReleaseSmall
     var len: usize = 0;
     conn.recv_timeout = timeouts.first_ms;
     while (std.mem.indexOf(u8, buf[0..len], "\r\n\r\n") == null) {

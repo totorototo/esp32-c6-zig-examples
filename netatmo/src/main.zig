@@ -272,13 +272,16 @@ fn refresh_access_token(buf: []u8) ![]const u8 {
         std.log.err("no Netatmo app: rebuild with -Dnetatmo_client_id=... -Dnetatmo_client_secret=... (see README)", .{});
         return error.NoCredentials;
     }
+    // Every buffer here holds a credential at some point: wiped on the way out.
     var stored_buf: [128]u8 = undefined;
+    defer std.crypto.secureZero(u8, &stored_buf);
     const refresh = settings.get(.refresh, &stored_buf) orelse if (config.refresh_token.len > 0) config.refresh_token else {
         std.log.err("no refresh token: rebuild with -Dnetatmo_refresh_token=... (see README)", .{});
         return error.NoCredentials;
     };
 
     var form_buf: [512]u8 = undefined;
+    defer std.crypto.secureZero(u8, &form_buf);
     var form: std.Io.Writer = .fixed(&form_buf);
     try form.writeAll("grant_type=refresh_token&refresh_token=");
     try energy.percent_encode(&form, refresh);
@@ -288,11 +291,13 @@ fn refresh_access_token(buf: []u8) ![]const u8 {
     try energy.percent_encode(&form, config.client_secret);
 
     var resp_buf: [1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &resp_buf);
     const resp = try https.request(api, "POST", "/oauth2/token", &.{
         .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded;charset=UTF-8" },
     }, form.buffered(), &resp_buf);
 
     var arena_mem: [2048]u8 = undefined;
+    defer std.crypto.secureZero(u8, &arena_mem);
     var fba: std.heap.FixedBufferAllocator = .init(&arena_mem);
     if (resp.status != 200) {
         const why = energy.error_text(fba.allocator(), resp.body);
