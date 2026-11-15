@@ -383,7 +383,7 @@ fn control(ctx: bridge_task.Context) !void {
     while (true) {
         const t = now_ms();
         loop.tick_screen(t);
-        loop.web();
+        loop.web(t);
         loop.button(t);
         if (config.screen and touch_ui.take_forget()) forget();
         rtos.sleep(.from_ms(poll_ms));
@@ -482,10 +482,16 @@ const Loop = struct {
         }
     }
 
-    /// Takes the web task's next question, unless one is still being worked on.
-    fn web(l: *Loop) void {
+    /// Takes the web task's next question, unless one is still being worked on. One past
+    /// its deadline is dropped: the client already got a 504, so acting on it now (a light
+    /// changing, a forget) would contradict what it was told.
+    fn web(l: *Loop, t: u64) void {
         if (l.web_open != null) return;
         const q = asks.get_one(.non_blocking) catch return; // nothing asked
+        if (t >= q.deadline) {
+            std.log.warn("web request {} dropped: it timed out before its turn", .{q.seq});
+            return;
+        }
         switch (q.ask) {
             .state => answer(q.seq, snapshot()),
             .forget => {
@@ -521,7 +527,8 @@ const Snapshot = struct {
 
 const Answer = union(enum) { state: Snapshot, no_selection, refused, forgetting };
 
-const Question = struct { seq: u32, ask: Ask };
+/// `deadline`: uptime (ms) after which the web task no longer waits for the answer.
+const Question = struct { seq: u32, deadline: u64, ask: Ask };
 const Reply = struct { seq: u32, answer: Answer };
 
 var ask_buf: [1]Question = undefined;
@@ -552,22 +559,24 @@ fn answer(seq: u32, a: Answer) void {
 /// The web task's side: one question at a time, bounded. Longer than a bridge request
 /// (`hue.response_timeout_ms`) plus a refresh that may be ahead of it in the bridge task.
 fn ask(q: Ask) error{Timeout}!Answer {
-    const timeout_ms = 25_000;
     web_seq +%= 1;
     const seq = web_seq;
-    try asks.put_one(.{ .seq = seq, .ask = q }, .{ .after = .from_ms(1000) });
-    const start = now_ms();
+    // The one limit both tasks go by: here to stop waiting, in `Loop.web` to drop the
+    // question unanswered, so a request the client was told failed (504) can't happen later.
+    const deadline = now_ms() + ask_timeout_ms;
+    try asks.put_one(.{ .seq = seq, .deadline = deadline, .ask = q }, .{ .after = .from_ms(1000) });
     while (true) {
-        // One reading of the clock: two could straddle the limit, and `left` underflow.
-        const waited = now_ms() - start;
-        if (waited >= timeout_ms) break;
-        const left: u32 = @intCast(timeout_ms - waited);
+        // One reading of the clock: two could straddle the deadline, and `left` underflow.
+        const now = now_ms();
+        if (now >= deadline) return error.Timeout;
+        const left: u32 = @intCast(deadline - now);
         const r = try answers.get_one(.{ .after = .from_ms(left) });
         if (r.seq == seq) return r.answer;
         // A late answer to a question already given up on.
     }
-    return error.Timeout;
 }
+
+const ask_timeout_ms = 25_000;
 
 var web_seq: u32 = 0;
 
