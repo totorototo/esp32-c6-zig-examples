@@ -6,8 +6,8 @@
     .dependencies = .{
         .common = .{ .path = "../common" },
         .microzig = .{
-            .url = "git+https://github.com/totorototo/microzig#1db8453ffc559f6f110b8eb73b3fc13e2698765b",
-            .hash = "microzig-0.17.33-D20YSf6rlAGm271Z33bBVhHNoCavh2WMfWh9y4NtTjeE",
+            .url = "git+https://github.com/totorototo/microzig#87d55ac124b51b697874f9057065f2cbbf05ec9c",
+            .hash = "microzig-0.17.33-D20YScWzlAGzuBlP2r_C__Cfq4AhGnAS4Agd6z0fyqf7",
         },
     },
     .paths = .{
