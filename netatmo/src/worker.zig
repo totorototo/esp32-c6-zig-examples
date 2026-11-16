@@ -101,7 +101,8 @@ fn log_failure(shown: *energy.Home, cmd: Cmd, err: anyerror) void {
     switch (cmd) {
         .refresh => log.warn("refresh failed: {t}", .{err}),
         .set => |s| {
-            const name = if (shown.room(s.room.slice())) |room| room.name.slice() else s.room.slice();
+            const id = s.room.slice();
+            const name = if (shown.room(id)) |room| room.name.slice() else id;
             log.err("sending to `{s}` failed: {t}", .{ name, err });
         },
     }

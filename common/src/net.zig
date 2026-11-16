@@ -54,7 +54,10 @@ pub const microzig_options: microzig.Options = .{
     .cpu = .{ .interrupt_stack = .{ .enable = true, .size = 8192 } },
     .hal = .{
         .rtos = .{ .enable = true },
-        .radio = .{ .wifi = .{ .on_packet_received = on_packet_received } },
+        .radio = .{ .wifi = .{
+            .on_packet_received = on_packet_received,
+            .on_event = on_wifi_event,
+        } },
     },
 };
 
@@ -62,6 +65,48 @@ var netif: lwip.c.netif = undefined;
 /// Set by `up` once `netif` exists; read by the Wi-Fi driver's receive path, another task.
 var netif_ready: std.atomic.Value(bool) = .init(false);
 var ip_ready: rtos.Signal(void) = .{};
+
+/// The last disconnect, reason code in the low byte and RSSI (dBm, as a `u8`) in the high
+/// one; 0 means none yet. Written by the driver's event task, read by `join`/`supervise`.
+var last_disconnect: std.atomic.Value(u16) = .init(0);
+
+fn on_wifi_event(e: radio.wifi.Event) void {
+    switch (e) {
+        .StaDisconnected => |d| {
+            const rssi: u8 = @bitCast(d.rssi);
+            last_disconnect.store(@as(u16, rssi) << 8 | d.reason, .release);
+        },
+        else => {},
+    }
+}
+
+/// Why the last attempt failed, for the retry log: the code plus, for the usual ones, what
+/// to check. Codes are the driver's `WIFI_REASON_*`.
+const Disconnect = struct {
+    raw: u16,
+
+    pub fn format(d: Disconnect, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const reason: u8 = @truncate(d.raw);
+        const rssi: i8 = @bitCast(@as(u8, @truncate(d.raw >> 8)));
+        if (reason == 0) return w.writeAll("no reason yet");
+        try w.print("reason {}", .{reason});
+        const hint: ?[]const u8 = switch (reason) {
+            15, 202, 204 => "wrong password?",
+            201 => "no access point with that name in range",
+            210, 211 => "access point security weaker than WPA2",
+            200 => "lost the access point's beacons (range, interference)",
+            8 => "left the network",
+            else => null,
+        };
+        if (hint) |h| try w.print(": {s}", .{h});
+        // -128: the driver heard no access point, so there is no reading.
+        if (rssi != 0 and rssi != -128) try w.print(", rssi {} dBm", .{rssi});
+    }
+};
+
+fn disconnect_reason() Disconnect {
+    return .{ .raw = last_disconnect.load(.acquire) };
+}
 
 /// Joins the configured network and waits for an IPv4 address.
 pub fn up(gpa: std.mem.Allocator) !void {
@@ -131,7 +176,8 @@ fn join() void {
             .connected => return,
             .disconnected => if (now_ms() - last_try >= retry_ms) {
                 last_try = now_ms();
-                log.warn("not connected to `{s}`: retrying", .{config.ssid});
+                const why = disconnect_reason();
+                log.warn("not connected to `{s}` ({f}): retrying", .{ config.ssid, why });
                 radio.wifi.connect() catch |err| log.warn("connect failed: {t}", .{err});
             },
             else => {},
@@ -148,7 +194,7 @@ fn supervise() void {
         rtos.sleep(.from_ms(500));
         if (radio.wifi.get_sta_state() != .disconnected) continue;
 
-        log.warn("lost `{s}`: reconnecting", .{config.ssid});
+        log.warn("lost `{s}` ({f}): reconnecting", .{ config.ssid, disconnect_reason() });
         _ = lwip.c.netifapi_netif_common(&netif, lwip.c.netif_set_link_down, null);
         radio.wifi.connect() catch |err| log.warn("connect failed: {t}", .{err});
         join();
